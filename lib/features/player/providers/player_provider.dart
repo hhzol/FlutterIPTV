@@ -521,6 +521,10 @@ class PlayerProvider extends ChangeNotifier {
             : (ServiceLocator.log.currentLevel == LogLevel.off
                 ? MPVLogLevel.error
                 : MPVLogLevel.info),
+        protocolWhitelist: [
+          'file', 'http', 'https', 'tcp', 'tls', 
+          'crypto', 'hls', 'applehttp', 'udp', 'rtp'
+        ],
       ),
     );
 
