@@ -216,12 +216,22 @@ class _InteractiveEpgWidgetState extends State<InteractiveEpgWidget> {
                           widget.channel.hasCatchup &&
                           _isWithinCatchupRange(program);
 
+                      // ============================================================
+                      // MODIFIED: 只有当前正在播放的节目（直播或回放）才高亮
+                      // ============================================================
+                      final isPlayingThisCatchup = widget.isPlayingCatchup &&
+                          widget.currentCatchupProgram != null &&
+                          program.start == widget.currentCatchupProgram!.start &&
+                          program.title == widget.currentCatchupProgram!.title;
+
+                      final shouldHighlight = isLive || isPlayingThisCatchup;
+
                       return InkWell(
                         onTap: canCatchup ? () => widget.onProgramSelected(program) : null,
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                          // 修改点1：回放节目使用与直播相同的背景色（与日期选择器选中背景一致）
-                          color: (isLive || canCatchup)
+                          // MODIFIED: 只有 shouldHighlight 为 true 时才应用背景色
+                          color: shouldHighlight
                               ? AppTheme.primaryColor.withOpacity(0.2)
                               : null,
                           child: Row(
@@ -258,8 +268,8 @@ class _InteractiveEpgWidgetState extends State<InteractiveEpgWidget> {
                                     Text(
                                       program.title,
                                       style: TextStyle(
-                                        // 修改点2：回放节目标题也使用 primaryColor
-                                        color: (isLive || canCatchup)
+                                        // MODIFIED: 标题颜色同样只对高亮节目使用 primaryColor
+                                        color: shouldHighlight
                                             ? AppTheme.primaryColor
                                             : Colors.white,
                                         fontSize: 15,
