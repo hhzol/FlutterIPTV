@@ -32,6 +32,9 @@ class PlayerProvider extends ChangeNotifier {
 
   // Common state
   Channel? _currentChannel;
+  List<Channel> _playlist = [];
+  int _currentIndex = -1;
+
   PlayerState _state = PlayerState.idle;
   String? _error;
   Duration _position = Duration.zero;
@@ -60,6 +63,20 @@ class PlayerProvider extends ChangeNotifier {
   String _videoOutput = 'auto';
   String _vo = 'unknown';
   String _configuredVo = 'auto';
+
+  // Debug & Stream Specs
+  String _hwdecMode = 'unknown';
+  String _videoCodec = '';
+  double _fps = 0;
+  String _configuredHwdec = 'unknown';
+
+  double _currentFps = 0;
+  int _videoWidth = 0;
+  int _videoHeight = 0;
+  double _downloadSpeed = 0;
+
+  String _audioCodec = '';
+  int _audioChannels = 0;
 
   // Override duration for catchup playback
   Duration? _overrideDuration;
@@ -95,6 +112,56 @@ class PlayerProvider extends ChangeNotifier {
       _state == PlayerState.loading || _state == PlayerState.buffering;
   bool get hasError => _state == PlayerState.error && _error != null;
 
+  double get currentFps => _currentFps;
+  int get videoWidth => _videoWidth;
+  int get videoHeight => _videoHeight;
+  double get downloadSpeed => _downloadSpeed;
+
+  int get currentSourceIndex => _currentChannel?.currentSourceIndex ?? 0;
+  int get sourceCount => _currentChannel?.sourceCount ?? 1;
+
+  String get videoInfo {
+    if (_mediaKitPlayer == null) return '';
+    final w = _mediaKitPlayer!.state.width ?? _videoWidth;
+    final h = _mediaKitPlayer!.state.height ?? _videoHeight;
+    if (w == 0 || h == 0) return '';
+    final parts = <String>['${w}x$h'];
+    if (_videoCodec.isNotEmpty) parts.add(_videoCodec);
+    if (_fps > 0) parts.add('${_fps.toStringAsFixed(1)} fps');
+    if (_audioCodec.isNotEmpty) {
+      final audioPart = StringBuffer(_audioCodec);
+      if (_audioChannels > 0) {
+        audioPart.write(' | $_audioChannels声道');
+      }
+      parts.add(audioPart.toString());
+    }
+    final hwdecInfo = _formatHwdecInfo();
+    if (hwdecInfo.isNotEmpty) {
+      parts.add('hwdec: $hwdecInfo');
+    }
+    final voInfo = _formatVoInfo();
+    if (voInfo.isNotEmpty) {
+      parts.add('vo: $voInfo');
+    }
+    if (_downloadSpeed > 0) {
+      final bitrateMbps = _downloadSpeed * 8 / 1000000;
+      if (bitrateMbps >= 100) {
+        parts.add('${bitrateMbps.toStringAsFixed(0)} Mbps');
+      } else {
+        parts.add('${bitrateMbps.toStringAsFixed(1)} Mbps');
+      }
+    }
+    return parts.join(' | ');
+  }
+
+  String _formatHwdecInfo() => _hwdecMode;
+  String _formatVoInfo() => _vo;
+
+  double get progress {
+    if (_duration.inMilliseconds == 0) return 0;
+    return _position.inMilliseconds / _duration.inMilliseconds;
+  }
+
   /// Create Media object with custom User-Agent header
   Media _createMedia(String url) {
     final userAgent = ServiceLocator.settings?.userAgent ?? SettingsProvider.defaultUserAgent;
@@ -109,12 +176,9 @@ class PlayerProvider extends ChangeNotifier {
 
     // 2. 检查直播类型（如果是点播或回放，可拖动）
     if (_currentChannel?.isSeekable == true) {
-      // 回放内容（Replay）应该总是 seekable，即使 duration 暂时无效（可能是流加载延迟）
       if (_currentChannel?.type == ChannelType.replay) {
         return true;
       }
-
-      // 但还需要检查 duration 是否有效
       if (_duration.inSeconds > 0 && _duration.inSeconds <= 86400) {
         return true;
       }
@@ -134,10 +198,8 @@ class PlayerProvider extends ChangeNotifier {
   /// Check if should show progress bar based on settings and content
   bool shouldShowProgressBar(String progressBarMode) {
     if (progressBarMode == 'never') return false;
-    // Always show if we have an override duration (catchup)
     if (_overrideDuration != null) return true;
     if (progressBarMode == 'always') return _duration.inSeconds > 0;
-    // auto mode: only show for seekable content
     return isSeekable && _duration.inSeconds > 0;
   }
 
@@ -234,11 +296,155 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  PlayerProvider() {
+    _initPlayer();
+  }
+
+  // ==================== 播放控制对外 API ====================
+
+  /// 播放频道
+  Future<void> playChannel(Channel channel, {List<Channel>? playlist}) async {
+    if (playlist != null) {
+      _playlist = playlist;
+      _currentIndex = playlist.indexWhere((c) => c.id == channel.id);
+    }
+    _currentChannel = channel;
+    _retryCount = 0;
+    _error = null;
+    _errorDisplayed = false;
+    await _playCurrentSource();
+  }
+
+  /// 直接播放 URL
+  Future<void> playUrl(String url, {String? title}) async {
+    final channel = Channel(
+      id: 'custom_url_${DateTime.now().millisecondsSinceEpoch}',
+      name: title ?? '自定义流',
+      url: url,
+      sources: [url],
+      groupName: '自定义',
+    );
+    await playChannel(channel);
+  }
+
+  /// 播放下一个频道
+  Future<void> playNext() async {
+    if (_playlist.isEmpty || _currentIndex < 0) return;
+    int nextIndex = (_currentIndex + 1) % _playlist.length;
+    _currentIndex = nextIndex;
+    await playChannel(_playlist[nextIndex]);
+  }
+
+  /// 播放上一个频道
+  Future<void> playPrevious() async {
+    if (_playlist.isEmpty || _currentIndex < 0) return;
+    int prevIndex = (_currentIndex - 1 + _playlist.length) % _playlist.length;
+    _currentIndex = prevIndex;
+    await playChannel(_playlist[prevIndex]);
+  }
+
+  /// 切换到下一个视频源
+  Future<void> switchToNextSource() async {
+    if (_currentChannel == null || !_currentChannel!.hasMultipleSources) return;
+    final nextIndex = (_currentChannel!.currentSourceIndex + 1) % _currentChannel!.sourceCount;
+    _currentChannel!.currentSourceIndex = nextIndex;
+    _retryCount = 0;
+    await _playCurrentSource();
+  }
+
+  /// 切换到上一个视频源
+  Future<void> switchToPreviousSource() async {
+    if (_currentChannel == null || !_currentChannel!.hasMultipleSources) return;
+    final prevIndex = (_currentChannel!.currentSourceIndex - 1 + _currentChannel!.sourceCount) % _currentChannel!.sourceCount;
+    _currentChannel!.currentSourceIndex = prevIndex;
+    _retryCount = 0;
+    await _playCurrentSource();
+  }
+
+  /// 暂停
+  Future<void> pause() async {
+    if (_useNativePlayer) return;
+    await _mediaKitPlayer?.pause();
+    _state = PlayerState.paused;
+    notifyListeners();
+  }
+
+  /// 恢复/播放
+  Future<void> play() async {
+    if (_useNativePlayer) return;
+    await _mediaKitPlayer?.play();
+    _state = PlayerState.playing;
+    notifyListeners();
+  }
+
+  /// 切换播放/暂停状态
+  Future<void> togglePlayPause() async {
+    if (isPlaying) {
+      await pause();
+    } else {
+      await play();
+    }
+  }
+
+  /// 停止播放
+  Future<void> stop() async {
+    if (!_useNativePlayer) {
+      await _mediaKitPlayer?.stop();
+    }
+    _state = PlayerState.idle;
+    _currentChannel = null;
+    _overrideDuration = null;
+    notifyListeners();
+  }
+
+  /// 跳转进度
+  Future<void> seek(Duration position) async {
+    if (_useNativePlayer) return;
+    await _mediaKitPlayer?.seek(position);
+  }
+
+  /// 设置音量 (0.0 ~ 1.0)
+  Future<void> setVolume(double volume) async {
+    _volume = volume.clamp(0.0, 1.0);
+    _isMuted = _volume == 0;
+    if (!_useNativePlayer) {
+      await _mediaKitPlayer?.setVolume(_volume * 100);
+    }
+    notifyListeners();
+  }
+
+  /// 静音切换
+  Future<void> toggleMute() async {
+    _isMuted = !_isMuted;
+    if (!_useNativePlayer) {
+      await _mediaKitPlayer?.setVolume(_isMuted ? 0 : _volume * 100);
+    }
+    notifyListeners();
+  }
+
+  /// 设置倍速
+  Future<void> setPlaybackSpeed(double speed) async {
+    _playbackSpeed = speed;
+    if (!_useNativePlayer) {
+      await _mediaKitPlayer?.setRate(speed);
+    }
+    notifyListeners();
+  }
+
+  /// 重新初始化播放器（例如修改设置后）
+  Future<void> reinitializePlayer() async {
+    final currentChan = _currentChannel;
+    final currentPos = _position;
+    await _initMediaKitPlayer();
+    if (currentChan != null) {
+      await playChannel(currentChan);
+      if (currentPos > Duration.zero && isSeekable) {
+        await seek(currentPos);
+      }
+    }
+  }
+
   /// 播放回放节目入口方法
-  /// [channel]: 当前播放的频道对象
-  /// [catchupTemplate]: 模板字符串（优先读 channel.catchupSource，若无可传全局解析出来的 catchup-source）
-  /// [startTime]: EPG 节目的开始时间
-  /// [endTime]: EPG 节目的结束时间
   Future<void> playCatchup({
     required Channel channel,
     required String catchupTemplate,
@@ -275,7 +481,6 @@ class PlayerProvider extends ChangeNotifier {
 
     try {
       if (!_useNativePlayer) {
-        // 解析 302 重定向
         final realUrl = await ServiceLocator.redirectCache.resolveRealPlayUrl(catchupUrl);
         _resetDeinterlaceDetection();
         await _applyDeinterlaceFilter();
@@ -297,8 +502,6 @@ class PlayerProvider extends ChangeNotifier {
     required DateTime endTime,
   }) {
     String result = template;
-
-    // 正则匹配 ${(b)...} 和 ${(e)...} 占位符
     final regExp = RegExp(r'\$\{\(([be])\)([^}]+)\}');
 
     result = result.replaceAllMapped(regExp, (match) {
@@ -313,7 +516,6 @@ class PlayerProvider extends ChangeNotifier {
       }
     });
 
-    // 处理 query 参数拼接符号 (? 或 &)
     if (result.startsWith('?')) {
       if (channelUrl.contains('?')) {
         return '$channelUrl&${result.substring(1)}';
@@ -405,7 +607,6 @@ class PlayerProvider extends ChangeNotifier {
   Future<void> _retryPlayback() async {
     if (_currentChannel == null) return;
 
-    final startTime = DateTime.now();
     _state = PlayerState.loading;
     _error = null;
     notifyListeners();
@@ -423,70 +624,6 @@ class PlayerProvider extends ChangeNotifier {
       _setError('Failed to play channel: $e');
     }
     notifyListeners();
-  }
-
-  String _hwdecMode = 'unknown';
-  String _videoCodec = '';
-  double _fps = 0;
-  String _configuredHwdec = 'unknown';
-
-  double _currentFps = 0;
-  int _videoWidth = 0;
-  int _videoHeight = 0;
-  double _downloadSpeed = 0;
-
-  String _audioCodec = '';
-  int _audioChannels = 0;
-
-  double get currentFps => _currentFps;
-  int get videoWidth => _videoWidth;
-  int get videoHeight => _videoHeight;
-  double get downloadSpeed => _downloadSpeed;
-
-  String get videoInfo {
-    if (_mediaKitPlayer == null) return '';
-    final w = _mediaKitPlayer!.state.width;
-    final h = _mediaKitPlayer!.state.height;
-    if (w == 0 || h == 0) return '';
-    final parts = <String>['${w}x$h'];
-    if (_videoCodec.isNotEmpty) parts.add(_videoCodec);
-    if (_fps > 0) parts.add('${_fps.toStringAsFixed(1)} fps');
-    if (_audioCodec.isNotEmpty) {
-      final audioPart = StringBuffer(_audioCodec);
-      if (_audioChannels > 0) {
-        audioPart.write(' | $_audioChannels声道');
-      }
-      parts.add(audioPart.toString());
-    }
-    final hwdecInfo = _formatHwdecInfo();
-    if (hwdecInfo.isNotEmpty) {
-      parts.add('hwdec: $hwdecInfo');
-    }
-    final voInfo = _formatVoInfo();
-    if (voInfo.isNotEmpty) {
-      parts.add('vo: $voInfo');
-    }
-    if (_downloadSpeed > 0) {
-      final bitrateMbps = _downloadSpeed * 8 / 1000000;
-      if (bitrateMbps >= 100) {
-        parts.add('${bitrateMbps.toStringAsFixed(0)} Mbps');
-      } else {
-        parts.add('${bitrateMbps.toStringAsFixed(1)} Mbps');
-      }
-    }
-    return parts.join(' | ');
-  }
-
-  String _formatHwdecInfo() => _hwdecMode;
-  String _formatVoInfo() => _vo;
-
-  double get progress {
-    if (_duration.inMilliseconds == 0) return 0;
-    return _position.inMilliseconds / _duration.inMilliseconds;
-  }
-
-  PlayerProvider() {
-    _initPlayer();
   }
 
   void _initPlayer({bool useSoftwareDecoding = false}) {
@@ -705,7 +842,6 @@ class PlayerProvider extends ChangeNotifier {
 
         _deinterlaceConfiguredForCurrentStream = true;
 
-        final sigPeak = await _safeGetProperty('video-params/sig-peak', 'sig-peak');
         final codec = await _safeGetProperty('video-params/codec', 'codec');
 
         final h = params.h ?? 0;
