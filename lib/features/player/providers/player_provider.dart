@@ -1,16 +1,16 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/widgets.dart';
+import 'package:intl/intl.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
-import 'package:intl/intl.dart';
-import 'dart:io';
-import 'dart:async';
-import 'dart:math' as math;
 
 import '../../../core/models/channel.dart';
 import '../../../core/platform/platform_detector.dart';
-import '../../../core/services/service_locator.dart';
 import '../../../core/services/channel_test_service.dart';
 import '../../../core/services/log_service.dart';
+import '../../../core/services/service_locator.dart';
 import '../../settings/providers/settings_provider.dart';
 
 enum PlayerState {
@@ -39,32 +39,27 @@ class PlayerProvider extends ChangeNotifier {
   double _playbackSpeed = 1.0;
   bool _isFullscreen = false;
   bool _controlsVisible = true;
-  int _volumeBoostDb = 0;
 
   int _retryCount = 0;
   static const int _maxRetries = 2;
   Timer? _retryTimer;
-  bool _isAutoSwitching = false;
   bool _isAutoDetecting = false;
   bool _isSoftwareDecoding = false;
-  bool _noVideoFallbackAttempted = false;
-  bool _allowSoftwareFallback = true;
   String _windowsHwdecMode = 'auto-safe';
   bool _isDisposed = false;
+  
   StreamSubscription<VideoParams>? _videoParamsSubscription;
   bool _deinterlaceConfiguredForCurrentStream = false;
   bool _initialHwdecSet = false;
   int _deinterlaceGeneration = 0;
+  
   String _videoOutput = 'auto';
   String _vo = 'unknown';
-  String _configuredVo = 'auto';
-
   String _hwdecMode = 'unknown';
   String _videoCodec = '';
   double _fps = 0;
   String _configuredHwdec = 'unknown';
 
-  double _currentFps = 0;
   int _videoWidth = 0;
   int _videoHeight = 0;
   double _downloadSpeed = 0;
@@ -73,16 +68,26 @@ class PlayerProvider extends ChangeNotifier {
   int _audioChannels = 0;
 
   Duration? _overrideDuration;
+  Timer? _debugInfoTimer;
+
+  DateTime? _lastErrorTime;
+  String? _lastErrorMessage;
+  bool _errorDisplayed = false;
+
+  PlayerProvider() {
+    _initPlayer();
+  }
+
+  // ==================== Getters ====================
 
   bool get _useNativePlayer => Platform.isAndroid && PlatformDetector.isTV;
-
   Player? get player => _mediaKitPlayer;
   VideoController? get videoController => _videoController;
-
   Channel? get currentChannel => _currentChannel;
   PlayerState get state => _state;
   String? get error => _error;
   Duration get position => _position;
+  
   Duration get duration {
     if (_overrideDuration != null && _duration.inSeconds < 10) {
       return _overrideDuration!;
@@ -95,88 +100,62 @@ class PlayerProvider extends ChangeNotifier {
   double get playbackSpeed => _playbackSpeed;
   bool get isFullscreen => _isFullscreen;
   bool get controlsVisible => _controlsVisible;
-
   bool get isPlaying => _state == PlayerState.playing;
-  bool get isLoading =>
-      _state == PlayerState.loading || _state == PlayerState.buffering;
+  bool get isLoading => _state == PlayerState.loading || _state == PlayerState.buffering;
   bool get hasError => _state == PlayerState.error && _error != null;
 
-  double get currentFps => _currentFps;
   int get videoWidth => _videoWidth;
   int get videoHeight => _videoHeight;
   double get downloadSpeed => _downloadSpeed;
-
   int get currentSourceIndex => _currentChannel?.currentSourceIndex ?? 0;
   int get sourceCount => _currentChannel?.sourceCount ?? 1;
-
-  String get videoInfo {
-    if (_mediaKitPlayer == null) return '';
-    final w = _mediaKitPlayer!.state.width ?? _videoWidth;
-    final h = _mediaKitPlayer!.state.height ?? _videoHeight;
-    if (w == 0 || h == 0) return '';
-    final parts = <String>['${w}x$h'];
-    if (_videoCodec.isNotEmpty) parts.add(_videoCodec);
-    if (_fps > 0) parts.add('${_fps.toStringAsFixed(1)} fps');
-    if (_audioCodec.isNotEmpty) {
-      final audioPart = StringBuffer(_audioCodec);
-      if (_audioChannels > 0) {
-        audioPart.write(' | $_audioChannels声道');
-      }
-      parts.add(audioPart.toString());
-    }
-    final hwdecInfo = _formatHwdecInfo();
-    if (hwdecInfo.isNotEmpty) {
-      parts.add('hwdec: $hwdecInfo');
-    }
-    final voInfo = _formatVoInfo();
-    if (voInfo.isNotEmpty) {
-      parts.add('vo: $voInfo');
-    }
-    if (_downloadSpeed > 0) {
-      final bitrateMbps = _downloadSpeed * 8 / 1000000;
-      if (bitrateMbps >= 100) {
-        parts.add('${bitrateMbps.toStringAsFixed(0)} Mbps');
-      } else {
-        parts.add('${bitrateMbps.toStringAsFixed(1)} Mbps');
-      }
-    }
-    return parts.join(' | ');
-  }
-
-  String _formatHwdecInfo() => _hwdecMode;
-  String _formatVoInfo() => _vo;
 
   double get progress {
     if (_duration.inMilliseconds == 0) return 0;
     return _position.inMilliseconds / _duration.inMilliseconds;
   }
 
-  Media _createMedia(String url) {
-    final userAgent = ServiceLocator.settings?.userAgent ?? SettingsProvider.defaultUserAgent;
-    ServiceLocator.log.d('PlayerProvider: 创建Media对象 User-Agent: $userAgent');
-    return Media(url, httpHeaders: {'User-Agent': userAgent});
-  }
-
   bool get isSeekable {
     if (_currentChannel?.isLive == true) return false;
-
     if (_currentChannel?.isSeekable == true) {
-      if (_currentChannel?.type == ChannelType.replay) {
-        return true;
-      }
-      if (_duration.inSeconds > 0 && _duration.inSeconds <= 86400) {
-        return true;
-      }
+      if (_currentChannel?.type == ChannelType.replay) return true;
+      if (_duration.inSeconds > 0 && _duration.inSeconds <= 86400) return true;
     }
-
     if (_duration.inSeconds > 0 && _duration.inSeconds <= 86400) {
-      if (_currentChannel?.isLive != true) {
-        return true;
-      }
+      if (_currentChannel?.isLive != true) return true;
     }
-
     return false;
   }
+
+  bool get isLiveStream => !isSeekable;
+
+  String get videoInfo {
+    if (_mediaKitPlayer == null) return '';
+    final w = _mediaKitPlayer!.state.width ?? _videoWidth;
+    final h = _mediaKitPlayer!.state.height ?? _videoHeight;
+    if (w == 0 || h == 0) return '';
+    
+    final parts = <String>['${w}x$h'];
+    if (_videoCodec.isNotEmpty) parts.add(_videoCodec);
+    if (_fps > 0) parts.add('${_fps.toStringAsFixed(1)} fps');
+    if (_audioCodec.isNotEmpty) {
+      final audioPart = StringBuffer(_audioCodec);
+      if (_audioChannels > 0) audioPart.write(' | $_audioChannels声道');
+      parts.add(audioPart.toString());
+    }
+    if (_hwdecMode.isNotEmpty) parts.add('hwdec: $_hwdecMode');
+    if (_vo.isNotEmpty) parts.add('vo: $_vo');
+    
+    if (_downloadSpeed > 0) {
+      final bitrateMbps = _downloadSpeed * 8 / 1000000;
+      parts.add(bitrateMbps >= 100 
+        ? '${bitrateMbps.toStringAsFixed(0)} Mbps' 
+        : '${bitrateMbps.toStringAsFixed(1)} Mbps');
+    }
+    return parts.join(' | ');
+  }
+
+  // ==================== 播放控制 API ====================
 
   bool shouldShowProgressBar(String progressBarMode) {
     if (progressBarMode == 'never') return false;
@@ -190,97 +169,14 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  bool get isLiveStream => !isSeekable;
-
   void clearError({bool silent = false}) {
     _error = null;
     _errorDisplayed = true;
     if (_state == PlayerState.error) {
       _state = PlayerState.idle;
     }
-    if (!silent) {
-      notifyListeners();
-    }
+    if (!silent) notifyListeners();
   }
-
-  DateTime? _lastErrorTime;
-  String? _lastErrorMessage;
-  bool _errorDisplayed = false;
-
-  void _setError(String error) {
-    ServiceLocator.log.d(
-        'PlayerProvider: _setError 被调用 - 当前重试次数: $_retryCount/$_maxRetries, 错误: $error');
-
-    if (error.contains('seekable') ||
-        error.contains('Cannot seek') ||
-        error.contains('seek in this stream')) {
-      ServiceLocator.log.d('PlayerProvider: 忽略 seek 错误（直播流不支持拖动）');
-      return;
-    }
-
-    if (error.contains('Error decoding audio') ||
-        error.contains('audio decoder') ||
-        error.contains('Audio decoding')) {
-      ServiceLocator.log.d(
-          'PlayerProvider: Ignore audio decode warning (likely partial frame decode failure)');
-      return;
-    }
-
-    if (_retryCount < _maxRetries && _currentChannel != null) {
-      _retryCount++;
-      ServiceLocator.log
-          .d('PlayerProvider: 播放错误，尝试重试($_retryCount/$_maxRetries): $error');
-      _retryTimer?.cancel();
-      _retryTimer = Timer(const Duration(milliseconds: 500), () {
-        if (_currentChannel != null) {
-          _retryPlayback();
-        }
-      });
-      return;
-    }
-
-    if (_currentChannel != null && _currentChannel!.hasMultipleSources) {
-      final currentSourceIndex = _currentChannel!.currentSourceIndex;
-      final totalSources = _currentChannel!.sourceCount;
-
-      int nextIndex = currentSourceIndex + 1;
-
-      if (nextIndex < totalSources) {
-        ServiceLocator.log.d(
-            'PlayerProvider: 当前源(${currentSourceIndex + 1}/$totalSources) 重试失败，检测源 ${nextIndex + 1}');
-
-        _isAutoDetecting = true;
-        _checkAndSwitchToNextSource(nextIndex, error);
-        return;
-      } else {
-        ServiceLocator.log.d(
-            'PlayerProvider: 已到最后一个源 (${currentSourceIndex + 1}/$totalSources), 停止尝试');
-      }
-    }
-
-    final now = DateTime.now();
-    if (_errorDisplayed) {
-      return;
-    }
-    if (_lastErrorMessage == error &&
-        _lastErrorTime != null &&
-        now.difference(_lastErrorTime!).inSeconds < 30) {
-      return;
-    }
-    _lastErrorMessage = error;
-    _lastErrorTime = now;
-
-    ServiceLocator.log.d('PlayerProvider: Playback failed, show error');
-    _state = PlayerState.error;
-    _error = error;
-    notifyListeners();
-  }
-
-  PlayerProvider() {
-    _initPlayer();
-  }
-
-  // ==================== 播放控制 API ====================
 
   Future<void> playChannel(
     Channel channel, {
@@ -317,30 +213,26 @@ class PlayerProvider extends ChangeNotifier {
 
   Future<void> playNext({String? name, bool silent = false}) async {
     if (_playlist.isEmpty || _currentIndex < 0) return;
-    int nextIndex = (_currentIndex + 1) % _playlist.length;
-    _currentIndex = nextIndex;
-    await playChannel(_playlist[nextIndex], silent: silent);
+    _currentIndex = (_currentIndex + 1) % _playlist.length;
+    await playChannel(_playlist[_currentIndex], silent: silent);
   }
 
   Future<void> playPrevious({String? name, bool silent = false}) async {
     if (_playlist.isEmpty || _currentIndex < 0) return;
-    int prevIndex = (_currentIndex - 1 + _playlist.length) % _playlist.length;
-    _currentIndex = prevIndex;
-    await playChannel(_playlist[prevIndex], silent: silent);
+    _currentIndex = (_currentIndex - 1 + _playlist.length) % _playlist.length;
+    await playChannel(_playlist[_currentIndex], silent: silent);
   }
 
   Future<void> switchToNextSource([dynamic arg1, dynamic arg2]) async {
     if (_currentChannel == null || !_currentChannel!.hasMultipleSources) return;
-    final nextIndex = (_currentChannel!.currentSourceIndex + 1) % _currentChannel!.sourceCount;
-    _currentChannel!.currentSourceIndex = nextIndex;
+    _currentChannel!.currentSourceIndex = (_currentChannel!.currentSourceIndex + 1) % _currentChannel!.sourceCount;
     _retryCount = 0;
     await _playCurrentSource();
   }
 
   Future<void> switchToPreviousSource([dynamic arg1, dynamic arg2]) async {
     if (_currentChannel == null || !_currentChannel!.hasMultipleSources) return;
-    final prevIndex = (_currentChannel!.currentSourceIndex - 1 + _currentChannel!.sourceCount) % _currentChannel!.sourceCount;
-    _currentChannel!.currentSourceIndex = prevIndex;
+    _currentChannel!.currentSourceIndex = (_currentChannel!.currentSourceIndex - 1 + _currentChannel!.sourceCount) % _currentChannel!.sourceCount;
     _retryCount = 0;
     await _playCurrentSource();
   }
@@ -442,8 +334,7 @@ class PlayerProvider extends ChangeNotifier {
     _error = null;
     _errorDisplayed = false;
 
-    final programDuration = endTime.difference(startTime);
-    setOverrideDuration(programDuration);
+    setOverrideDuration(endTime.difference(startTime));
 
     final catchupUrl = _buildCatchupUrl(
       channelUrl: channel.currentUrl,
@@ -472,6 +363,21 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> warmup([dynamic arg1, dynamic arg2]) async {
+    if (_useNativePlayer) return;
+    if (_mediaKitPlayer == null) {
+      _initMediaKitPlayer();
+    }
+  }
+
+  // ==================== 私有辅助与播放逻辑 ====================
+
+  Media _createMedia(String url) {
+    final userAgent = ServiceLocator.settings?.userAgent ?? SettingsProvider.defaultUserAgent;
+    ServiceLocator.log.d('PlayerProvider: 创建Media对象 User-Agent: $userAgent');
+    return Media(url, httpHeaders: {'User-Agent': userAgent});
+  }
+
   String _buildCatchupUrl({
     required String channelUrl,
     required String template,
@@ -494,11 +400,7 @@ class PlayerProvider extends ChangeNotifier {
     });
 
     if (result.startsWith('?')) {
-      if (channelUrl.contains('?')) {
-        return '$channelUrl&${result.substring(1)}';
-      } else {
-        return '$channelUrl$result';
-      }
+      return channelUrl.contains('?') ? '$channelUrl&${result.substring(1)}' : '$channelUrl$result';
     } else if (result.startsWith('http://') || result.startsWith('https://')) {
       return result;
     } else {
@@ -513,9 +415,7 @@ class PlayerProvider extends ChangeNotifier {
     final url = _currentChannel!.currentUrl;
     _state = PlayerState.loading;
     _error = null;
-    if (!silent) {
-      notifyListeners();
-    }
+    if (!silent) notifyListeners();
 
     try {
       if (!_useNativePlayer) {
@@ -528,21 +428,69 @@ class PlayerProvider extends ChangeNotifier {
     } catch (e) {
       _setError('播放失败: $e');
     }
-    if (!silent) {
-      notifyListeners();
-    }
+    if (!silent) notifyListeners();
   }
 
-  Future<void> _checkAndSwitchToNextSource(
-      int nextIndex, String originalError) async {
+  void _setError(String error) {
+    ServiceLocator.log.d('PlayerProvider: _setError 被调用 - 当前重试次数: $_retryCount/$_maxRetries, 错误: $error');
+
+    if (error.contains('seekable') || error.contains('Cannot seek') || error.contains('seek in this stream')) {
+      ServiceLocator.log.d('PlayerProvider: 忽略 seek 错误（直播流不支持拖动）');
+      return;
+    }
+
+    if (error.contains('Error decoding audio') || error.contains('audio decoder') || error.contains('Audio decoding')) {
+      ServiceLocator.log.d('PlayerProvider: Ignore audio decode warning (likely partial frame decode failure)');
+      return;
+    }
+
+    if (_retryCount < _maxRetries && _currentChannel != null) {
+      _retryCount++;
+      ServiceLocator.log.d('PlayerProvider: 播放错误，尝试重试($_retryCount/$_maxRetries): $error');
+      _retryTimer?.cancel();
+      _retryTimer = Timer(const Duration(milliseconds: 500), () {
+        if (_currentChannel != null) _retryPlayback();
+      });
+      return;
+    }
+
+    if (_currentChannel != null && _currentChannel!.hasMultipleSources) {
+      final currentSourceIndex = _currentChannel!.currentSourceIndex;
+      final totalSources = _currentChannel!.sourceCount;
+      int nextIndex = currentSourceIndex + 1;
+
+      if (nextIndex < totalSources) {
+        ServiceLocator.log.d('PlayerProvider: 当前源(${currentSourceIndex + 1}/$totalSources) 重试失败，检测源 ${nextIndex + 1}');
+        _isAutoDetecting = true;
+        _checkAndSwitchToNextSource(nextIndex, error);
+        return;
+      } else {
+        ServiceLocator.log.d('PlayerProvider: 已到最后一个源 (${currentSourceIndex + 1}/$totalSources), 停止尝试');
+      }
+    }
+
+    final now = DateTime.now();
+    if (_errorDisplayed) return;
+    if (_lastErrorMessage == error && _lastErrorTime != null && now.difference(_lastErrorTime!).inSeconds < 30) {
+      return;
+    }
+    _lastErrorMessage = error;
+    _lastErrorTime = now;
+
+    ServiceLocator.log.d('PlayerProvider: Playback failed, show error');
+    _state = PlayerState.error;
+    _error = error;
+    notifyListeners();
+  }
+
+  Future<void> _checkAndSwitchToNextSource(int nextIndex, String originalError) async {
     if (_currentChannel == null || !_isAutoDetecting) return;
 
     _currentChannel!.currentSourceIndex = nextIndex;
     _state = PlayerState.loading;
     notifyListeners();
 
-    ServiceLocator.log.d(
-        'PlayerProvider: 检测源 ${nextIndex + 1}/${_currentChannel!.sourceCount}');
+    ServiceLocator.log.d('PlayerProvider: 检测源 ${nextIndex + 1}/${_currentChannel!.sourceCount}');
 
     final testService = ChannelTestService();
     final tempChannel = Channel(
@@ -578,10 +526,8 @@ class PlayerProvider extends ChangeNotifier {
 
     _isAutoDetecting = false;
     _retryCount = 0;
-    _isAutoSwitching = true;
     _lastErrorMessage = null;
     _playCurrentSource();
-    _isAutoSwitching = false;
   }
 
   Future<void> _retryPlayback() async {
@@ -591,11 +537,9 @@ class PlayerProvider extends ChangeNotifier {
     _error = null;
     notifyListeners();
 
-    final url = _currentChannel!.currentUrl;
-
     try {
       if (!_useNativePlayer) {
-        final realUrl = await ServiceLocator.redirectCache.resolveRealPlayUrl(url);
+        final realUrl = await ServiceLocator.redirectCache.resolveRealPlayUrl(_currentChannel!.currentUrl);
         await _applyDeinterlaceFilter();
         await _mediaKitPlayer?.open(_createMedia(realUrl));
         _state = PlayerState.playing;
@@ -607,21 +551,9 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   void _initPlayer({bool useSoftwareDecoding = false}) {
-    if (_useNativePlayer) {
-      return;
-    }
+    if (_useNativePlayer) return;
     _initMediaKitPlayer(useSoftwareDecoding: useSoftwareDecoding);
   }
-
-  Future<void> warmup([dynamic arg1, dynamic arg2]) async {
-    if (_useNativePlayer) return;
-
-    if (_mediaKitPlayer == null) {
-      _initMediaKitPlayer();
-    }
-  }
-
-  Timer? _debugInfoTimer;
 
   void _updateDebugInfo() {
     _debugInfoTimer?.cancel();
@@ -633,14 +565,12 @@ class PlayerProvider extends ChangeNotifier {
     });
   }
 
-  Future<void> _initMediaKitPlayer(
-      {bool useSoftwareDecoding = false, String bufferStrength = 'fast'}) async {
+  Future<void> _initMediaKitPlayer({bool useSoftwareDecoding = false, String bufferStrength = 'fast'}) async {
     _mediaKitPlayer?.dispose();
     _debugInfoTimer?.cancel();
     final prefs = ServiceLocator.prefs;
     final decodingMode = prefs.getString('decoding_mode') ?? 'auto';
     _windowsHwdecMode = prefs.getString('windows_hwdec_mode') ?? 'auto-safe';
-    _allowSoftwareFallback = prefs.getBool('allow_software_fallback') ?? true;
     _videoOutput = prefs.getString('video_output') ?? 'auto';
     final effectiveSoftware = useSoftwareDecoding || decodingMode == 'software';
     _isSoftwareDecoding = effectiveSoftware;
@@ -652,20 +582,11 @@ class PlayerProvider extends ChangeNotifier {
       _ => 32 * 1024 * 1024,
     };
 
-    String? vo;
-    switch (_videoOutput) {
-      case 'gpu':
-        vo = 'gpu';
-        break;
-      case 'libmpv':
-        vo = 'libmpv';
-        break;
-      case 'auto':
-      default:
-        vo = null;
-        break;
-    }
-    _configuredVo = _videoOutput;
+    String? vo = switch (_videoOutput) {
+      'gpu' => 'gpu',
+      'libmpv' => 'libmpv',
+      _ => null,
+    };
 
     _mediaKitPlayer = Player(
       configuration: PlayerConfiguration(
@@ -673,13 +594,8 @@ class PlayerProvider extends ChangeNotifier {
         vo: vo,
         logLevel: ServiceLocator.log.currentLevel == LogLevel.debug
             ? MPVLogLevel.debug
-            : (ServiceLocator.log.currentLevel == LogLevel.off
-                ? MPVLogLevel.error
-                : MPVLogLevel.info),
-        protocolWhitelist: [
-          'file', 'http', 'https', 'tcp', 'tls', 
-          'crypto', 'hls', 'applehttp', 'udp', 'rtp'
-        ],
+            : (ServiceLocator.log.currentLevel == LogLevel.off ? MPVLogLevel.error : MPVLogLevel.info),
+        protocolWhitelist: ['file', 'http', 'https', 'tcp', 'tls', 'crypto', 'hls', 'applehttp', 'udp', 'rtp'],
       ),
     );
 
@@ -687,25 +603,7 @@ class PlayerProvider extends ChangeNotifier {
     if (Platform.isAndroid) {
       hwdecMode = effectiveSoftware ? 'no' : 'mediacodec';
     } else if (Platform.isWindows) {
-      if (effectiveSoftware) {
-        hwdecMode = 'no';
-      } else {
-        switch (_windowsHwdecMode) {
-          case 'auto-copy':
-            hwdecMode = 'auto-copy';
-            break;
-          case 'd3d11va':
-            hwdecMode = 'd3d11va';
-            break;
-          case 'dxva2':
-            hwdecMode = 'dxva2';
-            break;
-          case 'auto-safe':
-          default:
-            hwdecMode = 'auto-safe';
-            break;
-        }
-      }
+      hwdecMode = effectiveSoftware ? 'no' : _windowsHwdecMode;
     }
 
     _configuredHwdec = hwdecMode ?? 'default';
@@ -726,6 +624,8 @@ class PlayerProvider extends ChangeNotifier {
     _resetDeinterlaceDetection();
     await _applyDeinterlaceFilter();
   }
+
+  // ==================== 原生 MPV 交互与解交错/HDR 渲染逻辑 ====================
 
   Future<bool> _safeSetProperty(String property, String value, String label) async {
     try {
@@ -748,17 +648,12 @@ class PlayerProvider extends ChangeNotifier {
 
   String _getConfiguredHwdecMode() {
     if (_isSoftwareDecoding) return 'no';
-    switch (_windowsHwdecMode) {
-      case 'auto-copy':
-        return 'auto-copy';
-      case 'd3d11va':
-        return 'd3d11va';
-      case 'dxva2':
-        return 'dxva2';
-      case 'auto-safe':
-      default:
-        return 'auto-safe';
-    }
+    return switch (_windowsHwdecMode) {
+      'auto-copy' => 'auto-copy',
+      'd3d11va' => 'd3d11va',
+      'dxva2' => 'dxva2',
+      _ => 'auto-safe',
+    };
   }
 
   void _resetDeinterlaceDetection() {
@@ -775,10 +670,7 @@ class PlayerProvider extends ChangeNotifier {
 
     await _safeSetProperty('video-sync', 'display-resample', 'video-sync');
     await _safeSetProperty('framedrop', 'vo', 'framedrop');
-    await _safeSetProperty(
-        'protocol-whitelist',
-        'udp,rtp,rtsp,tcp,tls,data,file,http,https,crypto',
-        'protocol-whitelist');
+    await _safeSetProperty('protocol-whitelist', 'udp,rtp,rtsp,tcp,tls,data,file,http,https,crypto', 'protocol-whitelist');
 
     if (enabled) {
       if (!_initialHwdecSet) {
@@ -812,18 +704,12 @@ class PlayerProvider extends ChangeNotifier {
         final srcGamma = await _safeGetProperty('video-params/gamma', 'gamma');
         final srcPrimaries = await _safeGetProperty('video-params/primaries', 'primaries');
 
-        if (srcGamma == null || srcGamma.isEmpty || srcPrimaries == null || srcPrimaries.isEmpty) {
-          return;
-        }
-
-        if (capturedGeneration != _deinterlaceGeneration) {
-          return;
-        }
+        if (srcGamma == null || srcGamma.isEmpty || srcPrimaries == null || srcPrimaries.isEmpty) return;
+        if (capturedGeneration != _deinterlaceGeneration) return;
 
         _deinterlaceConfiguredForCurrentStream = true;
 
         final codec = await _safeGetProperty('video-params/codec', 'codec');
-
         final h = params.h ?? 0;
         final w = params.w ?? 0;
         final isInterlaced = interlaced == '1';
@@ -831,8 +717,7 @@ class PlayerProvider extends ChangeNotifier {
         final is1080i = (h == 1080 && isInterlaced) ||
                         (h == 1080 && vfFps < 31 && interlaced != '0') ||
                         (codec == 'h264' && h == 1080 && w == 1920);
-        final isHDR = srcPrimaries == 'bt.2020' &&
-                      (srcGamma == 'pq' || srcGamma == 'hlg');
+        final isHDR = srcPrimaries == 'bt.2020' && (srcGamma == 'pq' || srcGamma == 'hlg');
 
         if (isHDR) {
           if (srcGamma == 'hlg') {
