@@ -1183,6 +1183,24 @@ class _PlayerScreenState extends State<PlayerScreen>
       return channel.url + replaced;
     }
 
+    // 兼容未声明 catchup 模式（即没有 catchup="..." 属性）、且
+    // catchup-source 本身不是一个完整 URL，而只是一段查询参数片段的情况
+    // （常见写法：catchup-source="playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}"，
+    // 注意片段本身可能不带开头的 "?" 或 "&"）。
+    // 判断依据：只要它不包含 "://"，就不是一个可以独立播放的完整 URL，
+    // 必须拼接在直播地址后面才能用。
+    final looksLikeFullUrl = channel.catchupSource!.contains('://');
+    if (!looksLikeFullUrl) {
+      var fragment = url.trimLeft();
+      // 去掉片段自带的开头 "?" 或 "&"（如果有的话），统一由下面重新决定
+      if (fragment.startsWith('?') || fragment.startsWith('&')) {
+        fragment = fragment.substring(1);
+      }
+      // 直播地址本身如果已经带查询参数（含 "?"），要用 "&" 连接；否则用 "?"
+      final separator = channel.url.contains('?') ? '&' : '?';
+      return channel.url + separator + fragment;
+    }
+
     return url;
   }
 
