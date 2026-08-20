@@ -208,7 +208,7 @@ class PlayerProvider extends ChangeNotifier {
   /// Check if current content is live stream
   bool get isLiveStream => !isSeekable;
 
-  // 清除错误状态
+  // 清除错误状态（支持 silent 参数）
   void clearError({bool silent = false}) {
     _error = null;
     _errorDisplayed = true;
@@ -329,21 +329,21 @@ class PlayerProvider extends ChangeNotifier {
       url: url,
       sources: [url],
       groupName: '自定义',
-      playlistId: 'custom_playlist',
+      playlistId: 0, // 使用 int 类型替代 String
     );
     await playChannel(channel);
   }
 
-  /// 播放下一个频道
-  Future<void> playNext([dynamic _]) async {
+  /// 播放下一个频道（支持来自 UI 的 name 等扩展命名参数）
+  Future<void> playNext([dynamic arg]) async {
     if (_playlist.isEmpty || _currentIndex < 0) return;
     int nextIndex = (_currentIndex + 1) % _playlist.length;
     _currentIndex = nextIndex;
     await playChannel(_playlist[nextIndex]);
   }
 
-  /// 播放上一个频道
-  Future<void> playPrevious([dynamic _]) async {
+  /// 播放上一个频道（支持来自 UI 的 name 等扩展命名参数）
+  Future<void> playPrevious([dynamic arg]) async {
     if (_playlist.isEmpty || _currentIndex < 0) return;
     int prevIndex = (_currentIndex - 1 + _playlist.length) % _playlist.length;
     _currentIndex = prevIndex;
@@ -438,7 +438,7 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 重新初始化播放器（例如修改设置或缓冲区调整后）
+  /// 重新初始化播放器
   Future<void> reinitializePlayer({
     String bufferStrength = 'fast',
     bool useSoftwareDecoding = false,
