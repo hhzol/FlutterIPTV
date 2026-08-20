@@ -171,10 +171,8 @@ class PlayerProvider extends ChangeNotifier {
 
   /// Check if current content is seekable (VOD or replay)
   bool get isSeekable {
-    // 1. 检查直播类型（如果明确是直播，不可拖动）
     if (_currentChannel?.isLive == true) return false;
 
-    // 2. 检查直播类型（如果是点播或回放，可拖动）
     if (_currentChannel?.isSeekable == true) {
       if (_currentChannel?.type == ChannelType.replay) {
         return true;
@@ -184,14 +182,12 @@ class PlayerProvider extends ChangeNotifier {
       }
     }
 
-    // 3. 检查 duration（点播内容有明确时长）
     if (_duration.inSeconds > 0 && _duration.inSeconds <= 86400) {
       if (_currentChannel?.isLive != true) {
         return true;
       }
     }
 
-    // 4. 默认不可拖动
     return false;
   }
 
@@ -213,13 +209,15 @@ class PlayerProvider extends ChangeNotifier {
   bool get isLiveStream => !isSeekable;
 
   // 清除错误状态
-  void clearError() {
+  void clearError({bool silent = false}) {
     _error = null;
     _errorDisplayed = true;
     if (_state == PlayerState.error) {
       _state = PlayerState.idle;
     }
-    notifyListeners();
+    if (!silent) {
+      notifyListeners();
+    }
   }
 
   // 错误防抖
@@ -303,16 +301,24 @@ class PlayerProvider extends ChangeNotifier {
   // ==================== 播放控制对外 API ====================
 
   /// 播放频道
-  Future<void> playChannel(Channel channel, {List<Channel>? playlist}) async {
+  Future<void> playChannel(
+    Channel channel, {
+    List<Channel>? playlist,
+    bool preserveCurrentSource = false,
+    bool silent = false,
+  }) async {
     if (playlist != null) {
       _playlist = playlist;
       _currentIndex = playlist.indexWhere((c) => c.id == channel.id);
     }
     _currentChannel = channel;
+    if (!preserveCurrentSource) {
+      _currentChannel?.currentSourceIndex = 0;
+    }
     _retryCount = 0;
     _error = null;
     _errorDisplayed = false;
-    await _playCurrentSource();
+    await _playCurrentSource(silent: silent);
   }
 
   /// 直接播放 URL
@@ -323,12 +329,13 @@ class PlayerProvider extends ChangeNotifier {
       url: url,
       sources: [url],
       groupName: '自定义',
+      playlistId: 'custom_playlist',
     );
     await playChannel(channel);
   }
 
   /// 播放下一个频道
-  Future<void> playNext() async {
+  Future<void> playNext([dynamic _]) async {
     if (_playlist.isEmpty || _currentIndex < 0) return;
     int nextIndex = (_currentIndex + 1) % _playlist.length;
     _currentIndex = nextIndex;
@@ -336,7 +343,7 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   /// 播放上一个频道
-  Future<void> playPrevious() async {
+  Future<void> playPrevious([dynamic _]) async {
     if (_playlist.isEmpty || _currentIndex < 0) return;
     int prevIndex = (_currentIndex - 1 + _playlist.length) % _playlist.length;
     _currentIndex = prevIndex;
@@ -362,7 +369,7 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   /// 暂停
-  Future<void> pause() async {
+  Future<void> pause([dynamic _]) async {
     if (_useNativePlayer) return;
     await _mediaKitPlayer?.pause();
     _state = PlayerState.paused;
@@ -370,7 +377,7 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   /// 恢复/播放
-  Future<void> play() async {
+  Future<void> play([dynamic _]) async {
     if (_useNativePlayer) return;
     await _mediaKitPlayer?.play();
     _state = PlayerState.playing;
@@ -378,7 +385,7 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   /// 切换播放/暂停状态
-  Future<void> togglePlayPause() async {
+  Future<void> togglePlayPause([dynamic _]) async {
     if (isPlaying) {
       await pause();
     } else {
@@ -387,7 +394,7 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   /// 停止播放
-  Future<void> stop() async {
+  Future<void> stop([dynamic _]) async {
     if (!_useNativePlayer) {
       await _mediaKitPlayer?.stop();
     }
@@ -431,13 +438,19 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 重新初始化播放器（例如修改设置后）
-  Future<void> reinitializePlayer() async {
+  /// 重新初始化播放器（例如修改设置或缓冲区调整后）
+  Future<void> reinitializePlayer({
+    String bufferStrength = 'fast',
+    bool useSoftwareDecoding = false,
+  }) async {
     final currentChan = _currentChannel;
     final currentPos = _position;
-    await _initMediaKitPlayer();
+    await _initMediaKitPlayer(
+      bufferStrength: bufferStrength,
+      useSoftwareDecoding: useSoftwareDecoding,
+    );
     if (currentChan != null) {
-      await playChannel(currentChan);
+      await playChannel(currentChan, preserveCurrentSource: true);
       if (currentPos > Duration.zero && isSeekable) {
         await seek(currentPos);
       }
@@ -462,11 +475,9 @@ class PlayerProvider extends ChangeNotifier {
     _error = null;
     _errorDisplayed = false;
 
-    // 1. 设置 overrideDuration 确保播放器进度条正常显示回放总时长
     final programDuration = endTime.difference(startTime);
     setOverrideDuration(programDuration);
 
-    // 2. 根据模板构建回放真实地址
     final catchupUrl = _buildCatchupUrl(
       channelUrl: channel.currentUrl,
       template: catchupTemplate,
@@ -530,14 +541,16 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   /// 播放当前所选的频道（直播）
-  Future<void> _playCurrentSource() async {
+  Future<void> _playCurrentSource({bool silent = false}) async {
     if (_currentChannel == null) return;
-    setOverrideDuration(null); // 清除回放的时长覆盖
+    setOverrideDuration(null);
 
     final url = _currentChannel!.currentUrl;
     _state = PlayerState.loading;
     _error = null;
-    notifyListeners();
+    if (!silent) {
+      notifyListeners();
+    }
 
     try {
       if (!_useNativePlayer) {
@@ -550,7 +563,9 @@ class PlayerProvider extends ChangeNotifier {
     } catch (e) {
       _setError('播放失败: $e');
     }
-    notifyListeners();
+    if (!silent) {
+      notifyListeners();
+    }
   }
 
   /// 检测并切换到下一个源
@@ -959,7 +974,7 @@ class PlayerProvider extends ChangeNotifier {
     _mediaKitPlayer!.stream.playing.listen((playing) {
       if (playing) {
         _state = PlayerState.playing;
-        _retryCount = 0; // 播放成功，重置重试计数
+        _retryCount = 0;
       } else if (_state == PlayerState.playing) {
         _state = PlayerState.paused;
       }
