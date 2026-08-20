@@ -329,25 +329,25 @@ class PlayerProvider extends ChangeNotifier {
       url: url,
       sources: [url],
       groupName: '自定义',
-      playlistId: 0, // 使用 int 类型替代 String
+      playlistId: 0, // 声明为 int 类型
     );
     await playChannel(channel);
   }
 
-  /// 播放下一个频道（支持来自 UI 的 name 等扩展命名参数）
-  Future<void> playNext([dynamic arg]) async {
+  /// 播放下一个频道
+  Future<void> playNext({String? name, bool silent = false}) async {
     if (_playlist.isEmpty || _currentIndex < 0) return;
     int nextIndex = (_currentIndex + 1) % _playlist.length;
     _currentIndex = nextIndex;
-    await playChannel(_playlist[nextIndex]);
+    await playChannel(_playlist[nextIndex], silent: silent);
   }
 
-  /// 播放上一个频道（支持来自 UI 的 name 等扩展命名参数）
-  Future<void> playPrevious([dynamic arg]) async {
+  /// 播放上一个频道
+  Future<void> playPrevious({String? name, bool silent = false}) async {
     if (_playlist.isEmpty || _currentIndex < 0) return;
     int prevIndex = (_currentIndex - 1 + _playlist.length) % _playlist.length;
     _currentIndex = prevIndex;
-    await playChannel(_playlist[prevIndex]);
+    await playChannel(_playlist[prevIndex], silent: silent);
   }
 
   /// 切换到下一个视频源
