@@ -306,6 +306,7 @@ class PlayerProvider extends ChangeNotifier {
     List<Channel>? playlist,
     bool preserveCurrentSource = false,
     bool silent = false,
+    String? name,
   }) async {
     if (playlist != null) {
       _playlist = playlist;
@@ -350,8 +351,8 @@ class PlayerProvider extends ChangeNotifier {
     await playChannel(_playlist[prevIndex], silent: silent);
   }
 
-  /// 切换到下一个视频源
-  Future<void> switchToNextSource() async {
+  /// 切换到下一个视频源（支持从 UI 回调传入任意 0~2 个位置参数）
+  Future<void> switchToNextSource([dynamic arg1, dynamic arg2]) async {
     if (_currentChannel == null || !_currentChannel!.hasMultipleSources) return;
     final nextIndex = (_currentChannel!.currentSourceIndex + 1) % _currentChannel!.sourceCount;
     _currentChannel!.currentSourceIndex = nextIndex;
@@ -359,8 +360,8 @@ class PlayerProvider extends ChangeNotifier {
     await _playCurrentSource();
   }
 
-  /// 切换到上一个视频源
-  Future<void> switchToPreviousSource() async {
+  /// 切换到上一个视频源（支持从 UI 回调传入任意 0~2 个位置参数）
+  Future<void> switchToPreviousSource([dynamic arg1, dynamic arg2]) async {
     if (_currentChannel == null || !_currentChannel!.hasMultipleSources) return;
     final prevIndex = (_currentChannel!.currentSourceIndex - 1 + _currentChannel!.sourceCount) % _currentChannel!.sourceCount;
     _currentChannel!.currentSourceIndex = prevIndex;
@@ -368,24 +369,24 @@ class PlayerProvider extends ChangeNotifier {
     await _playCurrentSource();
   }
 
-  /// 暂停
-  Future<void> pause([dynamic _]) async {
+  /// 暂停（支持从 UI 回调传入任意 0~2 个位置参数）
+  Future<void> pause([dynamic arg1, dynamic arg2]) async {
     if (_useNativePlayer) return;
     await _mediaKitPlayer?.pause();
     _state = PlayerState.paused;
     notifyListeners();
   }
 
-  /// 恢复/播放
-  Future<void> play([dynamic _]) async {
+  /// 恢复/播放（支持从 UI 回调传入任意 0~2 个位置参数）
+  Future<void> play([dynamic arg1, dynamic arg2]) async {
     if (_useNativePlayer) return;
     await _mediaKitPlayer?.play();
     _state = PlayerState.playing;
     notifyListeners();
   }
 
-  /// 切换播放/暂停状态
-  Future<void> togglePlayPause([dynamic _]) async {
+  /// 切换播放/暂停状态（支持从 UI 回调传入任意 0~2 个位置参数）
+  Future<void> togglePlayPause([dynamic arg1, dynamic arg2]) async {
     if (isPlaying) {
       await pause();
     } else {
@@ -393,8 +394,8 @@ class PlayerProvider extends ChangeNotifier {
     }
   }
 
-  /// 停止播放
-  Future<void> stop([dynamic _]) async {
+  /// 停止播放（支持从 UI 回调传入任意 0~2 个位置参数）
+  Future<void> stop([dynamic arg1, dynamic arg2]) async {
     if (!_useNativePlayer) {
       await _mediaKitPlayer?.stop();
     }
@@ -588,7 +589,9 @@ class PlayerProvider extends ChangeNotifier {
       groupName: _currentChannel!.groupName,
       logoUrl: _currentChannel!.logoUrl,
       sources: [_currentChannel!.sources[nextIndex]],
-      playlistId: _currentChannel!.playlistId,
+      playlistId: _currentChannel!.playlistId is int
+          ? (_currentChannel!.playlistId as int)
+          : (int.tryParse(_currentChannel!.playlistId?.toString() ?? '') ?? 0),
     );
 
     final result = await testService.testChannel(tempChannel);
@@ -648,7 +651,7 @@ class PlayerProvider extends ChangeNotifier {
     _initMediaKitPlayer(useSoftwareDecoding: useSoftwareDecoding);
   }
 
-  Future<void> warmup() async {
+  Future<void> warmup([dynamic arg1, dynamic arg2]) async {
     if (_useNativePlayer) return;
 
     if (_mediaKitPlayer == null) {
