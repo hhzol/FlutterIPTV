@@ -306,22 +306,8 @@ class _InteractiveEpgWidgetState extends State<InteractiveEpgWidget> {
                                   ),
                                 )
                               else if (canCatchup)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: AppTheme.primaryColor.withOpacity(0.3),
-                                    borderRadius: BorderRadius.circular(4),
-                                    border: Border.all(color: AppTheme.primaryColor, width: 1),
-                                  ),
-                                  child: const Text(
-                                    '回放',
-                                    style: TextStyle(
-                                      color: AppTheme.primaryColor,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                )
+                                const Icon(Icons.play_circle_outline,
+                                    color: Colors.white70, size: 20)
                               else if (!isPast)
                                 const Text(
                                   '即将播放',
