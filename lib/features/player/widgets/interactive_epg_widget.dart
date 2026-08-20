@@ -216,24 +216,32 @@ class _InteractiveEpgWidgetState extends State<InteractiveEpgWidget> {
                           widget.channel.hasCatchup &&
                           _isWithinCatchupRange(program);
 
-                      // ============================================================
-                      // MODIFIED: 只有当前正在播放的节目（直播或回放）才高亮
-                      // ============================================================
+                      // 判断是否当前正在播放的回放节目
                       final isPlayingThisCatchup = widget.isPlayingCatchup &&
                           widget.currentCatchupProgram != null &&
                           program.start == widget.currentCatchupProgram!.start &&
                           program.title == widget.currentCatchupProgram!.title;
 
+                      // 直播节目用蓝色，回放高亮用主题色（红色）
                       final shouldHighlight = isLive || isPlayingThisCatchup;
+
+                      // 如果高亮，根据类型选择颜色
+                      Color? highlightColor;
+                      Color? highlightBgColor;
+                      if (isLive) {
+                        highlightColor = Colors.blue;
+                        highlightBgColor = Colors.blue.withOpacity(0.2);
+                      } else if (isPlayingThisCatchup) {
+                        highlightColor = AppTheme.primaryColor;
+                        highlightBgColor = AppTheme.primaryColor.withOpacity(0.2);
+                      }
 
                       return InkWell(
                         onTap: canCatchup ? () => widget.onProgramSelected(program) : null,
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                          // MODIFIED: 只有 shouldHighlight 为 true 时才应用背景色
-                          color: shouldHighlight
-                              ? AppTheme.primaryColor.withOpacity(0.2)
-                              : null,
+                          // 背景：直播浅蓝，回放高亮浅红，否则透明
+                          color: shouldHighlight ? highlightBgColor : null,
                           child: Row(
                             children: [
                               // Time
@@ -243,7 +251,8 @@ class _InteractiveEpgWidgetState extends State<InteractiveEpgWidget> {
                                   Text(
                                     DateFormat('HH:mm').format(program.start),
                                     style: TextStyle(
-                                      color: isLive ? AppTheme.primaryColor : Colors.white,
+                                      // 直播时间变蓝色，否则白色
+                                      color: isLive ? Colors.blue : Colors.white,
                                       fontWeight: FontWeight.bold,
                                     ),
                                   ),
@@ -251,7 +260,7 @@ class _InteractiveEpgWidgetState extends State<InteractiveEpgWidget> {
                                     DateFormat('HH:mm').format(program.end),
                                     style: TextStyle(
                                       color: isLive
-                                          ? AppTheme.primaryColor.withOpacity(0.7)
+                                          ? Colors.blue.withOpacity(0.7)
                                           : Colors.white54,
                                       fontSize: 12,
                                     ),
@@ -268,9 +277,9 @@ class _InteractiveEpgWidgetState extends State<InteractiveEpgWidget> {
                                     Text(
                                       program.title,
                                       style: TextStyle(
-                                        // MODIFIED: 标题颜色同样只对高亮节目使用 primaryColor
+                                        // 标题：直播蓝色，回放高亮红色，否则白色
                                         color: shouldHighlight
-                                            ? AppTheme.primaryColor
+                                            ? highlightColor
                                             : Colors.white,
                                         fontSize: 15,
                                       ),
