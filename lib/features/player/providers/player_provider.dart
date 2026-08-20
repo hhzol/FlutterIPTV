@@ -22,15 +22,10 @@ enum PlayerState {
   buffering,
 }
 
-/// Unified player provider that uses:
-/// - Native Android Activity (via MethodChannel) on Android TV for best 4K performance
-/// - media_kit on all other platforms (Windows, Android phone/tablet, etc.)
 class PlayerProvider extends ChangeNotifier {
-  // media_kit player (for all platforms except Android TV)
   Player? _mediaKitPlayer;
   VideoController? _videoController;
 
-  // Common state
   Channel? _currentChannel;
   List<Channel> _playlist = [];
   int _currentIndex = -1;
@@ -47,10 +42,10 @@ class PlayerProvider extends ChangeNotifier {
   int _volumeBoostDb = 0;
 
   int _retryCount = 0;
-  static const int _maxRetries = 2; // 重试2次
+  static const int _maxRetries = 2;
   Timer? _retryTimer;
-  bool _isAutoSwitching = false; // 标记是否正在自动切换源
-  bool _isAutoDetecting = false; // 标记是否正在自动检测源
+  bool _isAutoSwitching = false;
+  bool _isAutoDetecting = false;
   bool _isSoftwareDecoding = false;
   bool _noVideoFallbackAttempted = false;
   bool _allowSoftwareFallback = true;
@@ -59,12 +54,11 @@ class PlayerProvider extends ChangeNotifier {
   StreamSubscription<VideoParams>? _videoParamsSubscription;
   bool _deinterlaceConfiguredForCurrentStream = false;
   bool _initialHwdecSet = false;
-  int _deinterlaceGeneration = 0; // 代际计数器，用于检测过时的 videoParams 回调
+  int _deinterlaceGeneration = 0;
   String _videoOutput = 'auto';
   String _vo = 'unknown';
   String _configuredVo = 'auto';
 
-  // Debug & Stream Specs
   String _hwdecMode = 'unknown';
   String _videoCodec = '';
   double _fps = 0;
@@ -78,14 +72,10 @@ class PlayerProvider extends ChangeNotifier {
   String _audioCodec = '';
   int _audioChannels = 0;
 
-  // Override duration for catchup playback
   Duration? _overrideDuration;
 
-  // On Android TV, we use native player via Activity, so don't init any Flutter player
-  // On Android phone/tablet and other platforms, use media_kit
   bool get _useNativePlayer => Platform.isAndroid && PlatformDetector.isTV;
 
-  // Getters
   Player? get player => _mediaKitPlayer;
   VideoController? get videoController => _videoController;
 
@@ -94,7 +84,6 @@ class PlayerProvider extends ChangeNotifier {
   String? get error => _error;
   Duration get position => _position;
   Duration get duration {
-    // Return override duration if set and player reports zero/small duration
     if (_overrideDuration != null && _duration.inSeconds < 10) {
       return _overrideDuration!;
     }
@@ -162,14 +151,12 @@ class PlayerProvider extends ChangeNotifier {
     return _position.inMilliseconds / _duration.inMilliseconds;
   }
 
-  /// Create Media object with custom User-Agent header
   Media _createMedia(String url) {
     final userAgent = ServiceLocator.settings?.userAgent ?? SettingsProvider.defaultUserAgent;
     ServiceLocator.log.d('PlayerProvider: 创建Media对象 User-Agent: $userAgent');
     return Media(url, httpHeaders: {'User-Agent': userAgent});
   }
 
-  /// Check if current content is seekable (VOD or replay)
   bool get isSeekable {
     if (_currentChannel?.isLive == true) return false;
 
@@ -191,7 +178,6 @@ class PlayerProvider extends ChangeNotifier {
     return false;
   }
 
-  /// Check if should show progress bar based on settings and content
   bool shouldShowProgressBar(String progressBarMode) {
     if (progressBarMode == 'never') return false;
     if (_overrideDuration != null) return true;
@@ -199,16 +185,13 @@ class PlayerProvider extends ChangeNotifier {
     return isSeekable && _duration.inSeconds > 0;
   }
 
-  /// Set override duration for catchup playback
   void setOverrideDuration(Duration? duration) {
     _overrideDuration = duration;
     notifyListeners();
   }
 
-  /// Check if current content is live stream
   bool get isLiveStream => !isSeekable;
 
-  // 清除错误状态（支持 silent 参数）
   void clearError({bool silent = false}) {
     _error = null;
     _errorDisplayed = true;
@@ -220,7 +203,6 @@ class PlayerProvider extends ChangeNotifier {
     }
   }
 
-  // 错误防抖
   DateTime? _lastErrorTime;
   String? _lastErrorMessage;
   bool _errorDisplayed = false;
@@ -298,9 +280,8 @@ class PlayerProvider extends ChangeNotifier {
     _initPlayer();
   }
 
-  // ==================== 播放控制对外 API ====================
+  // ==================== 播放控制 API ====================
 
-  /// 播放频道
   Future<void> playChannel(
     Channel channel, {
     List<Channel>? playlist,
@@ -322,7 +303,6 @@ class PlayerProvider extends ChangeNotifier {
     await _playCurrentSource(silent: silent);
   }
 
-  /// 直接播放 URL
   Future<void> playUrl(String url, {String? title}) async {
     final channel = Channel(
       id: 'custom_url_${DateTime.now().millisecondsSinceEpoch}',
@@ -330,12 +310,11 @@ class PlayerProvider extends ChangeNotifier {
       url: url,
       sources: [url],
       groupName: '自定义',
-      playlistId: 0, // 声明为 int 类型
+      playlistId: null,
     );
     await playChannel(channel);
   }
 
-  /// 播放下一个频道
   Future<void> playNext({String? name, bool silent = false}) async {
     if (_playlist.isEmpty || _currentIndex < 0) return;
     int nextIndex = (_currentIndex + 1) % _playlist.length;
@@ -343,7 +322,6 @@ class PlayerProvider extends ChangeNotifier {
     await playChannel(_playlist[nextIndex], silent: silent);
   }
 
-  /// 播放上一个频道
   Future<void> playPrevious({String? name, bool silent = false}) async {
     if (_playlist.isEmpty || _currentIndex < 0) return;
     int prevIndex = (_currentIndex - 1 + _playlist.length) % _playlist.length;
@@ -351,7 +329,6 @@ class PlayerProvider extends ChangeNotifier {
     await playChannel(_playlist[prevIndex], silent: silent);
   }
 
-  /// 切换到下一个视频源（支持从 UI 回调传入任意 0~2 个位置参数）
   Future<void> switchToNextSource([dynamic arg1, dynamic arg2]) async {
     if (_currentChannel == null || !_currentChannel!.hasMultipleSources) return;
     final nextIndex = (_currentChannel!.currentSourceIndex + 1) % _currentChannel!.sourceCount;
@@ -360,7 +337,6 @@ class PlayerProvider extends ChangeNotifier {
     await _playCurrentSource();
   }
 
-  /// 切换到上一个视频源（支持从 UI 回调传入任意 0~2 个位置参数）
   Future<void> switchToPreviousSource([dynamic arg1, dynamic arg2]) async {
     if (_currentChannel == null || !_currentChannel!.hasMultipleSources) return;
     final prevIndex = (_currentChannel!.currentSourceIndex - 1 + _currentChannel!.sourceCount) % _currentChannel!.sourceCount;
@@ -369,7 +345,6 @@ class PlayerProvider extends ChangeNotifier {
     await _playCurrentSource();
   }
 
-  /// 暂停（支持从 UI 回调传入任意 0~2 个位置参数）
   Future<void> pause([dynamic arg1, dynamic arg2]) async {
     if (_useNativePlayer) return;
     await _mediaKitPlayer?.pause();
@@ -377,7 +352,6 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 恢复/播放（支持从 UI 回调传入任意 0~2 个位置参数）
   Future<void> play([dynamic arg1, dynamic arg2]) async {
     if (_useNativePlayer) return;
     await _mediaKitPlayer?.play();
@@ -385,7 +359,6 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 切换播放/暂停状态（支持从 UI 回调传入任意 0~2 个位置参数）
   Future<void> togglePlayPause([dynamic arg1, dynamic arg2]) async {
     if (isPlaying) {
       await pause();
@@ -394,7 +367,6 @@ class PlayerProvider extends ChangeNotifier {
     }
   }
 
-  /// 停止播放（支持从 UI 回调传入任意 0~2 个位置参数）
   Future<void> stop([dynamic arg1, dynamic arg2]) async {
     if (!_useNativePlayer) {
       await _mediaKitPlayer?.stop();
@@ -405,13 +377,11 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 跳转进度
   Future<void> seek(Duration position) async {
     if (_useNativePlayer) return;
     await _mediaKitPlayer?.seek(position);
   }
 
-  /// 设置音量 (0.0 ~ 1.0)
   Future<void> setVolume(double volume) async {
     _volume = volume.clamp(0.0, 1.0);
     _isMuted = _volume == 0;
@@ -421,7 +391,6 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 静音切换
   Future<void> toggleMute() async {
     _isMuted = !_isMuted;
     if (!_useNativePlayer) {
@@ -430,7 +399,6 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 设置倍速
   Future<void> setPlaybackSpeed(double speed) async {
     _playbackSpeed = speed;
     if (!_useNativePlayer) {
@@ -439,7 +407,6 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 重新初始化播放器
   Future<void> reinitializePlayer({
     String bufferStrength = 'fast',
     bool useSoftwareDecoding = false,
@@ -458,7 +425,6 @@ class PlayerProvider extends ChangeNotifier {
     }
   }
 
-  /// 播放回放节目入口方法
   Future<void> playCatchup({
     required Channel channel,
     required String catchupTemplate,
@@ -506,7 +472,6 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 内部 Helper：根据 `${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}` 替换拼接回放 URL
   String _buildCatchupUrl({
     required String channelUrl,
     required String template,
@@ -517,8 +482,8 @@ class PlayerProvider extends ChangeNotifier {
     final regExp = RegExp(r'\$\{\(([be])\)([^}]+)\}');
 
     result = result.replaceAllMapped(regExp, (match) {
-      final type = match.group(1);      // 'b' 代表 begin, 'e' 代表 end
-      final formatPattern = match.group(2)!; // 如 'yyyyMMddHHmmss'
+      final type = match.group(1);
+      final formatPattern = match.group(2)!;
       final targetTime = (type == 'b') ? startTime : endTime;
 
       try {
@@ -541,7 +506,6 @@ class PlayerProvider extends ChangeNotifier {
     }
   }
 
-  /// 播放当前所选的频道（直播）
   Future<void> _playCurrentSource({bool silent = false}) async {
     if (_currentChannel == null) return;
     setOverrideDuration(null);
@@ -569,7 +533,6 @@ class PlayerProvider extends ChangeNotifier {
     }
   }
 
-  /// 检测并切换到下一个源
   Future<void> _checkAndSwitchToNextSource(
       int nextIndex, String originalError) async {
     if (_currentChannel == null || !_isAutoDetecting) return;
@@ -621,7 +584,6 @@ class PlayerProvider extends ChangeNotifier {
     _isAutoSwitching = false;
   }
 
-  /// 重试播放当前频道
   Future<void> _retryPlayback() async {
     if (_currentChannel == null) return;
 
@@ -959,7 +921,7 @@ class PlayerProvider extends ChangeNotifier {
           message.contains('deprecated pixel format') ||
           message.contains("skip ('#ext") ||
           (message.contains('hls @') && message.contains('skip')) ||
-          message.contains('no such filter') ||
+          message.contains('no me filter') ||
           message.contains('error creating filters')) {
         return;
       }
