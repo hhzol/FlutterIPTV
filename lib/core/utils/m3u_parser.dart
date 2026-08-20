@@ -172,8 +172,14 @@ class M3UParser {
       return rawChannels;
     }
 
-    // Check for valid M3U header and extract EPG URL from first few lines
+    // Check for valid M3U header and extract EPG URL + global catchup config
+    // from first few lines. Many playlists declare catchup="default"
+    // catchup-days="7" catchup-source="..." ONCE on the #EXTM3U line instead
+    // of repeating it on every #EXTINF line.
     bool foundHeader = false;
+    String? headerCatchup;
+    String? headerCatchupSource;
+    int? headerCatchupDays;
     for (int i = 0; i < lines.length && i < 10; i++) {
       final line = lines[i].trim();
       debugPrint(
@@ -190,8 +196,19 @@ class M3UParser {
         if (extractedUrl != null) {
           epgUrl = extractedUrl;
           debugPrint('M3U Parser: 成功提取EPG URL: $epgUrl');
-          break;
         }
+
+        // Extract global catchup attributes declared on the header line
+        final headerAttrs = _parseAttributes(line.substring(_extM3U.length));
+        headerCatchup = headerAttrs['catchup'];
+        headerCatchupSource = headerAttrs['catchup-source'];
+        final headerDaysStr = headerAttrs['catchup-days'];
+        headerCatchupDays =
+            headerDaysStr != null ? int.tryParse(headerDaysStr) : null;
+        debugPrint(
+            'M3U Parser: 头部 catchup 配置 - catchup: $headerCatchup, source: $headerCatchupSource, days: $headerCatchupDays');
+
+        break;
       }
     }
 
@@ -245,9 +262,11 @@ class M3UParser {
               logoUrl: currentLogo,
               groupName: currentGroup ?? 'Uncategorized',
               epgId: currentEpgId,
-              catchup: currentCatchup,
-              catchupSource: currentCatchupSource,
-              catchupDays: currentCatchupDays,
+              // Per-channel EXTINF value wins; otherwise fall back to the
+              // global value declared once on the #EXTM3U header line.
+              catchup: currentCatchup ?? headerCatchup,
+              catchupSource: currentCatchupSource ?? headerCatchupSource,
+              catchupDays: currentCatchupDays ?? headerCatchupDays,
             );
 
             rawChannels.add(channel);
