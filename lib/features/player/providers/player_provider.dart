@@ -1575,8 +1575,8 @@ class PlayerProvider extends ChangeNotifier {
   /// 如果转换失败返回 null。
   Future<String?> _resolveWithRrsip(String url) async {
     try {
-      // 1. 获取最终 URL（处理 302 重定向）
-      final finalUrl = await ServiceLocator.redirectCache.resolveRealPlayUrl(url);
+      final finalUrl = await ServiceLocator.redirectCache.resolveRealPlayUrl(url)
+          .timeout(const Duration(seconds: 10));
       final uri = Uri.parse(finalUrl);
 
       // 如果已经是 IP 直连且带有 rrsip，无需转换
@@ -1617,6 +1617,9 @@ class PlayerProvider extends ChangeNotifier {
         },
       );
       return newUri.toString();
+    } on TimeoutException {
+      ServiceLocator.log.w('_resolveWithRrsip 超时');
+      return null;
     } catch (e) {
       ServiceLocator.log.w('_resolveWithRrsip 失败: $e');
       return null;
