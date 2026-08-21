@@ -11,6 +11,7 @@ import '../../../core/platform/platform_detector.dart';
 import '../../../core/services/service_locator.dart';
 import '../../../core/services/channel_test_service.dart';
 import '../../../core/services/log_service.dart';
+import '../../../core/services/epg_service.dart';
 import '../../settings/providers/settings_provider.dart';
 
 enum PlayerState {
