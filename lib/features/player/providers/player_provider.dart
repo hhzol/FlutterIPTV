@@ -4,12 +4,14 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'dart:io';
 import 'dart:async';
 import 'dart:math' as math;
+import 'package:intl/intl.dart';
 
 import '../../../core/models/channel.dart';
 import '../../../core/platform/platform_detector.dart';
 import '../../../core/services/service_locator.dart';
 import '../../../core/services/channel_test_service.dart';
 import '../../../core/services/log_service.dart';
+import '../../../core/services/epg_service.dart'; // 新增：导入 EpgProgram
 import '../../settings/providers/settings_provider.dart';
 
 enum PlayerState {
@@ -19,6 +21,15 @@ enum PlayerState {
   paused,
   error,
   buffering,
+}
+
+/// 回放 URL 生成结果，包含干净的播放 URL 和起止时间字符串
+class CatchupUrlResult {
+  final String url; // 不含 playseek 参数的播放 URL
+  final String? startTime; // 开始时间字符串（如 "20260821092230"）
+  final String? endTime; // 结束时间字符串（如 "20260821101100"）
+
+  CatchupUrlResult({required this.url, this.startTime, this.endTime});
 }
 
 /// Unified player provider that uses:
@@ -1974,6 +1985,141 @@ class PlayerProvider extends ChangeNotifier {
     if (ip.startsWith('::')) return true; // 未指定地址
 
     return false;
+  }
+
+  // ============ 回放 URL 生成（方案一：分离 playseek） ============
+  /// 生成回放 URL 并提取起止时间，返回不带 playseek 参数的干净 URL 和起止时间字符串
+  /// 调用者应使用返回的 URL 进行播放，并在播放器初始化后通过 setProperty 设置 start 和 end 属性
+  CatchupUrlResult? generateCatchupUrlWithTime(Channel channel, EpgProgram program) {
+    // 1. 确定模板
+    String? catchupSource = channel.catchupSource;
+    if (catchupSource == null || catchupSource.isEmpty) {
+      final defaultTemplate = ServiceLocator.settings?.defaultCatchupSource;
+      if (defaultTemplate != null && defaultTemplate.isNotEmpty) {
+        catchupSource = defaultTemplate;
+      } else {
+        // 硬编码一个常见模板（兼容大多数 IPTV）
+        catchupSource = '?playseek=\${(b)yyyyMMddHHmmss}-\${(e)yyyyMMddHHmmss}';
+      }
+    }
+    if (catchupSource == null) return null;
+
+    final catchupMode = channel.catchup?.toLowerCase() ?? 'default';
+    final startLocal = program.start;
+    final endLocal = program.end;
+    final startUtc = startLocal.toUtc();
+    final endUtc = endLocal.toUtc();
+
+    final startIso = startUtc.toIso8601String();
+    final startIsoClean = startIso.replaceAll(RegExp(r'\.\d+Z$'), 'Z');
+    final endIso = endUtc.toIso8601String();
+    final endIsoClean = endIso.replaceAll(RegExp(r'\.\d+Z$'), 'Z');
+
+    var url = catchupSource;
+
+    // 处理自定义日期格式占位符（支持 ${(b)yyyyMMddHHmmss} 等）
+    final customFormatRegex = RegExp(r'\$\{\(([bBeE])([uU]?)\)([^}]+)\}');
+    final customMatches = customFormatRegex.allMatches(url);
+    for (final match in customMatches) {
+      final timeMarker = match.group(1)!.toLowerCase();
+      final tzMarker = match.group(2)!.toLowerCase();
+      final formatStr = match.group(3)!;
+      DateTime dateTime;
+      if (tzMarker == 'u') {
+        dateTime = (timeMarker == 'b') ? startUtc : endUtc;
+      } else {
+        dateTime = (timeMarker == 'b') ? startLocal : endLocal;
+      }
+      try {
+        final formatter = DateFormat(formatStr);
+        final formatted = formatter.format(dateTime);
+        url = url.replaceFirst(match.group(0)!, formatted);
+      } catch (_) {
+        // 忽略格式错误
+      }
+    }
+
+    // 处理花括号版本 {(b)yyyyMMddHHmmss}
+    final braceFormatRegex = RegExp(r'\{\(([bBeE])([uU]?)\)([^}]+)\}');
+    final braceMatches = braceFormatRegex.allMatches(url);
+    for (final match in braceMatches) {
+      final timeMarker = match.group(1)!.toLowerCase();
+      final tzMarker = match.group(2)!.toLowerCase();
+      final formatStr = match.group(3)!;
+      DateTime dateTime;
+      if (tzMarker == 'u') {
+        dateTime = (timeMarker == 'b') ? startUtc : endUtc;
+      } else {
+        dateTime = (timeMarker == 'b') ? startLocal : endLocal;
+      }
+      try {
+        final formatter = DateFormat(formatStr);
+        final formatted = formatter.format(dateTime);
+        url = url.replaceFirst(match.group(0)!, formatted);
+      } catch (_) {}
+    }
+
+    // 标准 ${start} / ${stop} / ${end} 占位符
+    url = url.replaceAll(RegExp(r'\$\{start\}'), startIsoClean);
+    url = url.replaceAll(RegExp(r'\$\{stop\}'), endIsoClean);
+    url = url.replaceAll(RegExp(r'\$\{end\}'), endIsoClean);
+
+    url = url.replaceAll(RegExp(r'\{start\}'), startIsoClean);
+    url = url.replaceAll(RegExp(r'\{stop\}'), endIsoClean);
+    url = url.replaceAll(RegExp(r'\{end\}'), endIsoClean);
+
+    // append 模式特殊处理
+    if (catchupMode == 'append') {
+      final template = catchupSource;
+      final startSec = startUtc.millisecondsSinceEpoch ~/ 1000;
+      final endSec = endUtc.millisecondsSinceEpoch ~/ 1000;
+      final replaced = template
+          .replaceAll('{utc}', startSec.toString())
+          .replaceAll('{utcend}', endSec.toString());
+      final fullUrl = channel.url + replaced;
+      // append 模式下没有 playseek 参数，直接返回
+      return CatchupUrlResult(url: fullUrl, startTime: null, endTime: null);
+    }
+
+    // 判断 catchup-source 是完整 URL 还是片段
+    final looksLikeFullUrl = catchupSource.contains('://');
+    String finalUrl;
+    if (!looksLikeFullUrl) {
+      var fragment = url.trimLeft();
+      if (fragment.startsWith('?') || fragment.startsWith('&')) {
+        fragment = fragment.substring(1);
+      }
+      final separator = channel.url.contains('?') ? '&' : '?';
+      finalUrl = channel.url + separator + fragment;
+    } else {
+      finalUrl = url;
+    }
+
+    // 从最终 URL 中提取 playseek 参数
+    final parsed = Uri.parse(finalUrl);
+    String? startTime;
+    String? endTime;
+    final playseek = parsed.queryParameters['playseek'];
+    if (playseek != null && playseek.contains('-')) {
+      final parts = playseek.split('-');
+      if (parts.length == 2) {
+        startTime = parts[0];
+        endTime = parts[1];
+      }
+    }
+
+    // 移除 playseek 参数，得到干净 URL
+    final cleanUri = parsed.replace(queryParameters: {
+      ...parsed.queryParameters,
+      'playseek': null,
+    });
+    final cleanUrl = cleanUri.toString();
+
+    return CatchupUrlResult(
+      url: cleanUrl,
+      startTime: startTime,
+      endTime: endTime,
+    );
   }
 
   @override
