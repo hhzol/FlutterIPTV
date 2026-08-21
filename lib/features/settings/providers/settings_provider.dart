@@ -1,440 +1,1017 @@
-import 'package:sqflite/sqflite.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import 'package:path/path.dart';
-import 'dart:io';
-import 'package:path_provider/path_provider.dart';
-import 'package:flutter/services.dart';
-import '../services/service_locator.dart';
+import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import '../../../core/services/service_locator.dart';
+import '../../../core/services/log_service.dart';
+import '../../../core/services/logo_cache_service.dart';
+import '../../../core/services/local_server_service.dart';
 
-class DatabaseHelper {
-  static Database? _database;
-  static const String _databaseName = 'flutter_iptv.db';
-  static const int _databaseVersion = 9; // Added catchup support to channels
+class SettingsProvider extends ChangeNotifier {
+  // Keys for SharedPreferences
+  static const String _keyThemeMode = 'theme_mode';
+  static const String _keyAutoRefresh = 'auto_refresh';
+  static const String _keyRefreshInterval = 'refresh_interval';
+  static const String _keyDefaultQuality = 'default_quality';
+  static const String _keyHardwareDecoding = 'hardware_decoding';
+  static const String _keyDecodingMode =
+      'decoding_mode'; // New: auto, hardware, software
+  static const String _keyWindowsHwdecMode =
+      'windows_hwdec_mode'; // auto-safe, auto-copy, d3d11va, dxva2
+  // d3d11vpp 去交错模式：off, bob, adaptive, mocomp（仅在 auto-safe 下生效）
+  static const String _keyD3d11vppMode = 'd3d11vpp_mode';
+  static const List<String> d3d11vppModes = ['off', 'bob', 'adaptive', 'mocomp'];
+  static const String _keyAllowSoftwareFallback = 'allow_software_fallback';
+  static const String _keyVideoOutput = 'video_output'; // auto, libmpv, gpu
+  static const String _keyChannelMergeRule =
+      'channel_merge_rule'; // New: name, name_group
+  static const String _keyBufferSize = 'buffer_size';
+  static const String _keyLastPlaylistId = 'last_playlist_id';
+  static const String _keyEnableEpg = 'enable_epg';
+  static const String _keyEpgUrl = 'epg_url';
+  static const String _keyParentalControl = 'parental_control';
+  static const String _keyParentalPin = 'parental_pin';
+  static const String _keyAutoPlay = 'auto_play';
+  static const String _keyRememberLastChannel = 'remember_last_channel';
+  static const String _keyLastChannelId = 'last_channel_id';
+  static const String _keyLocale = 'locale';
+  static const String _keyVolumeNormalization = 'volume_normalization';
+  static const String _keyVolumeBoost = 'volume_boost';
+  static const String _keyBufferStrength =
+      'buffer_strength'; // fast, balanced, stable
+  static const String _keyShowFps = 'show_fps';
+  static const String _keyShowClock = 'show_clock';
+  static const String _keyShowNetworkSpeed = 'show_network_speed';
+  static const String _keyShowVideoInfo = 'show_video_info';
+  static const String _keyProgressBarMode =
+      'progress_bar_mode'; // auto, always, never
+  static const String _keyEnableMultiScreen = 'enable_multi_screen';
+  static const String _keyDefaultScreenPosition = 'default_screen_position';
+  static const String _keyActiveScreenIndex = 'active_screen_index';
+  static const String _keyLastPlayMode =
+      'last_play_mode'; // 'single' or 'multi'
+  static const String _keyLastMultiScreenChannels =
+      'last_multi_screen_channels'; // JSON string of channel IDs
+  static const String _keyLastMultiScreenSourceIndexes =
+      'last_multi_screen_source_indexes'; // comma-separated source indexes
+  static const String _keyShowMultiScreenChannelName =
+      'show_multi_screen_channel_name'; // 多屏播放是否显示频道名称
+  static const String _keySeekStepSeconds = 'seek_step_seconds'; // 快进/快退跨度（秒）
+  static const String _keyDarkColorScheme = 'dark_color_scheme';
+  static const String _keyLightColorScheme = 'light_color_scheme';
+  static const String _keyFontFamily = 'font_family';
+  static const String _keySimpleMenu = 'simple_menu';
+  static const String _keyLogLevel = 'log_level'; // debug, release, off
+  static const String _keyMobileOrientation =
+      'mobile_orientation'; // portrait, landscape, auto
+  static const String _keyLastAppVersion = 'last_app_version'; // 用于检测版本更新
+  static const String _keyShowWatchHistoryOnHome =
+      'show_watch_history_on_home'; // 首页是否显示观看记录
+  static const String _keyShowFavoritesOnHome =
+      'show_favorites_on_home'; // 首页是否显示收藏夹
+  static const String _keyUserAgent =
+      'user_agent'; // User-Agent for HTTP requests
+  static const String _keyShowUserAgent =
+      'show_user_agent'; // 是否在播放器OSD显示User-Agent
+  static const String _keyPageTransitionAnimation =
+      'page_transition_animation'; // 页面切换动画：fade, slide, scale, material, cupertino, none
+  static const String _keyDeinterlaceEnabled =
+      'deinterlace_enabled'; // 去交错（反隔行）开启
+  static const String _keyLogoCacheEnabled = 'logo_cache_enabled'; // 台标图片缓存开关
+  static const String _keyLogoCacheDays = 'logo_cache_days'; // 台标缓存保留天数
+  static const String _keyLogoCacheMaxObjects = 'logo_cache_max_objects'; // 台标最大缓存条数
+  static const String _keyWebLogEnabled = 'web_log_enabled'; // 网页日志开关
 
-  /// 当前数据库 schema 版本（供备份元数据等引用，避免硬编码漂移）
-  static int get databaseVersion => _databaseVersion;
+  // Default User-Agent (same as current hardcoded value)
+  static const String defaultUserAgent = 'Wget/1.21.3';
 
-  Future<void> initialize() async {
-    ServiceLocator.log.d('DatabaseHelper: 开始初始化数据库');
-    final startTime = DateTime.now();
+  // Settings values
+  String _themeMode = 'dark';
+  bool _autoRefresh = false;
+  int _refreshInterval = 24; // hours
+  String _defaultQuality = 'auto';
+  bool _hardwareDecoding = true;
+  String _decodingMode = 'auto'; // New: auto, hardware, software
+  String _windowsHwdecMode = 'auto-safe';
+  String _d3d11vppMode = 'bob';
+  bool _allowSoftwareFallback = true;
+  String _videoOutput = 'auto';
+  String _channelMergeRule = 'name_group'; // New: name, name_group
+  int _bufferSize = 30; // seconds
+  int? _lastPlaylistId;
+  bool _enableEpg = true;
+  String? _epgUrl;
+  bool _parentalControl = false;
+  String? _parentalPin;
+  bool _autoPlay = false;
+  bool _rememberLastChannel = true;
+  int? _lastChannelId;
+  Locale? _locale;
+  bool _volumeNormalization = false;
+  int _volumeBoost = 0; // -20 to +20 dB
+  String _bufferStrength = 'fast'; // fast, balanced, stable
+  bool _showFps = true; // 默认显示FPS
+  bool _showClock = true; // 默认显示时间
+  bool _showNetworkSpeed = true; // 默认显示网速
+  bool _showVideoInfo = true; // 默认显示分辨率码率
+  String _progressBarMode = 'auto'; // 进度条显示模式：auto, always, never
+  bool _enableMultiScreen = true; // 默认开启分屏
+  int _defaultScreenPosition = 1; // 默认播放位置（左上角）
+  int _activeScreenIndex = 0; // 当前活动窗口索引
+  String _lastPlayMode = 'single'; // 上次播放模式：'single' 或 'multi'
+  List<int?> _lastMultiScreenChannels = [null, null, null, null]; // 分屏频道ID列表
+  List<int> _lastMultiScreenSourceIndexes = [0, 0, 0, 0]; // 分屏源索引列表
+  bool _showMultiScreenChannelName = false; // 多屏播放是否显示频道名称（默认关闭）
+  int _seekStepSeconds = 10; // 快进/快退跨度（秒），默认10秒
+  String _darkColorScheme = 'ocean'; // 黑暗模式配色方案（默认海洋）
+  String _lightColorScheme = 'sky'; // 明亮模式配色方案（默认天空）
+  String _fontFamily = 'Arial'; // 字体设置（默认Arial，英文环境）
+  bool _simpleMenu = true; // 是否使用简单菜单栏（不展开）- 默认启用
+  String _logLevel = 'off'; // 日志级别：debug, release, off - 默认关闭
+  String _mobileOrientation =
+      'portrait'; // 手机端屏幕方向：portrait, landscape, auto - 默认竖屏
+  bool _showWatchHistoryOnHome = false; // 首页是否显示观看记录 - 默认不显示
+  bool _showFavoritesOnHome = false; // 首页是否显示收藏夹 - 默认不显示
+  String _userAgent =
+      defaultUserAgent; // User-Agent for HTTP requests - 默认 Wget/1.21.3
+  bool _showUserAgent = false; // 是否在播放器OSD显示User-Agent - 默认不显示
+  String _pageTransitionAnimation = 'fade'; // 页面切换动画
+  bool _deinterlaceEnabled = true; // 去交错（反隔行）默认开启（应对480i/576i/1080i广电录屏源）
+  bool _logoCacheEnabled = true; // 台标图片缓存默认开启（减少流量消耗和加载延迟）
+  int _logoCacheDays = 7; // 台标缓存默认保留7天
+  int _logoCacheMaxObjects = 500; // 台标最大缓存500张图片（约 10-50MB）
+  bool _webLogEnabled = false; // 网页日志服务开关 - 默认关闭
 
-    if (_database != null) {
-      ServiceLocator.log.d('DatabaseHelper: 数据库已初始化，跳过');
-      return;
+  // Getters
+  String get themeMode => _themeMode;
+  bool get autoRefresh => _autoRefresh;
+  int get refreshInterval => _refreshInterval;
+  String get defaultQuality => _defaultQuality;
+  bool get hardwareDecoding => _hardwareDecoding;
+  String get decodingMode => _decodingMode;
+  String get windowsHwdecMode => _windowsHwdecMode;
+  String get d3d11vppMode => _d3d11vppMode;
+  bool get allowSoftwareFallback => _allowSoftwareFallback;
+  String get videoOutput => _videoOutput;
+  String get channelMergeRule => _channelMergeRule;
+  int get bufferSize => _bufferSize;
+  int? get lastPlaylistId => _lastPlaylistId;
+  bool get enableEpg => _enableEpg;
+  String? get epgUrl => _epgUrl;
+  bool get parentalControl => _parentalControl;
+  bool get autoPlay => _autoPlay;
+  bool get rememberLastChannel => _rememberLastChannel;
+  int? get lastChannelId => _lastChannelId;
+  Locale? get locale => _locale;
+  bool get volumeNormalization => _volumeNormalization;
+  int get volumeBoost => _volumeBoost;
+  String get bufferStrength => _bufferStrength;
+  bool get showFps => _showFps;
+  bool get showClock => _showClock;
+  bool get showNetworkSpeed => _showNetworkSpeed;
+  bool get showVideoInfo => _showVideoInfo;
+  String get progressBarMode => _progressBarMode;
+  bool get enableMultiScreen => _enableMultiScreen;
+  int get defaultScreenPosition => _defaultScreenPosition;
+  int get activeScreenIndex => _activeScreenIndex;
+  String get lastPlayMode => _lastPlayMode;
+  List<int?> get lastMultiScreenChannels => _lastMultiScreenChannels;
+  List<int> get lastMultiScreenSourceIndexes => _lastMultiScreenSourceIndexes;
+  bool get showMultiScreenChannelName => _showMultiScreenChannelName;
+  int get seekStepSeconds => _seekStepSeconds;
+  String get darkColorScheme => _darkColorScheme;
+  String get lightColorScheme => _lightColorScheme;
+  String get fontFamily => _fontFamily;
+  bool get simpleMenu => _simpleMenu;
+  String get logLevel => _logLevel;
+  String get mobileOrientation => _mobileOrientation;
+  bool get showWatchHistoryOnHome => _showWatchHistoryOnHome;
+  bool get showFavoritesOnHome => _showFavoritesOnHome;
+  String get userAgent => _userAgent;
+  bool get showUserAgent => _showUserAgent;
+  String get pageTransitionAnimation => _pageTransitionAnimation;
+  bool get deinterlaceEnabled => _deinterlaceEnabled;
+  bool get logoCacheEnabled => _logoCacheEnabled;
+  int get logoCacheDays => _logoCacheDays;
+  int get logoCacheMaxObjects => _logoCacheMaxObjects;
+  bool get webLogEnabled => _webLogEnabled;
+
+  /// 获取当前应该使用的配色方案
+  String get currentColorScheme {
+    if (_themeMode == 'dark') return _darkColorScheme;
+    if (_themeMode == 'light') return _lightColorScheme;
+    // 跟随系统时需要根据系统亮度决定
+    // 这里返回黑暗模式配色作为默认，实际使用时会在 UI 层判断
+    return _darkColorScheme;
+  }
+
+  SettingsProvider() {
+    _loadSettings();
+    _checkVersionUpdate();
+  }
+
+  void _loadSettings() {
+    final prefs = ServiceLocator.prefs;
+
+    _themeMode = prefs.getString(_keyThemeMode) ?? 'dark';
+    _autoRefresh = prefs.getBool(_keyAutoRefresh) ?? false;
+    _refreshInterval = prefs.getInt(_keyRefreshInterval) ?? 24;
+    _defaultQuality = prefs.getString(_keyDefaultQuality) ?? 'auto';
+    _hardwareDecoding = prefs.getBool(_keyHardwareDecoding) ?? true;
+    _decodingMode = prefs.getString(_keyDecodingMode) ?? 'auto';
+    _windowsHwdecMode = prefs.getString(_keyWindowsHwdecMode) ?? 'auto-safe';
+    // d3d11vpp 模式：校验是否为合法值，避免残留非法值导致 vf 参数错误
+    final savedD3d11vpp = prefs.getString(_keyD3d11vppMode);
+    _d3d11vppMode =
+        (savedD3d11vpp != null && d3d11vppModes.contains(savedD3d11vpp))
+            ? savedD3d11vpp
+            : 'bob';
+    _allowSoftwareFallback = prefs.getBool(_keyAllowSoftwareFallback) ?? true;
+    _videoOutput = prefs.getString(_keyVideoOutput) ?? 'auto';
+    _channelMergeRule = prefs.getString(_keyChannelMergeRule) ?? 'name_group';
+    _bufferSize = prefs.getInt(_keyBufferSize) ?? 30;
+    _lastPlaylistId = prefs.getInt(_keyLastPlaylistId);
+    _enableEpg = prefs.getBool(_keyEnableEpg) ?? true;
+    _epgUrl = prefs.getString(_keyEpgUrl);
+    _parentalControl = prefs.getBool(_keyParentalControl) ?? false;
+    _parentalPin = prefs.getString(_keyParentalPin);
+    _autoPlay = prefs.getBool(_keyAutoPlay) ?? false;
+    _rememberLastChannel = prefs.getBool(_keyRememberLastChannel) ?? true;
+    _lastChannelId = prefs.getInt(_keyLastChannelId);
+
+    final localeCode = prefs.getString(_keyLocale);
+    if (localeCode != null) {
+      final parts = localeCode.split('_');
+      _locale = Locale(parts[0], parts.length > 1 ? parts[1] : null);
     }
+    _volumeNormalization = prefs.getBool(_keyVolumeNormalization) ?? false;
+    _volumeBoost = prefs.getInt(_keyVolumeBoost) ?? 0;
+    _bufferStrength = prefs.getString(_keyBufferStrength) ?? 'fast';
+    _showFps = prefs.getBool(_keyShowFps) ?? true;
+    _showClock = prefs.getBool(_keyShowClock) ?? true;
+    _showNetworkSpeed = prefs.getBool(_keyShowNetworkSpeed) ?? true;
+    _showVideoInfo = prefs.getBool(_keyShowVideoInfo) ?? true;
+    _progressBarMode = prefs.getString(_keyProgressBarMode) ?? 'auto';
+    _enableMultiScreen = prefs.getBool(_keyEnableMultiScreen) ?? true;
+    _defaultScreenPosition = prefs.getInt(_keyDefaultScreenPosition) ?? 1;
+    _activeScreenIndex = prefs.getInt(_keyActiveScreenIndex) ?? 0;
+    _lastPlayMode = prefs.getString(_keyLastPlayMode) ?? 'single';
+    _showMultiScreenChannelName =
+        prefs.getBool(_keyShowMultiScreenChannelName) ?? false;
+    _seekStepSeconds = prefs.getInt(_keySeekStepSeconds) ?? 10;
+    ServiceLocator.log.d(
+        'SettingsProvider: loaded showMultiScreenChannelName=$_showMultiScreenChannelName');
 
-    // Note: FFI initialization is handled in main.dart
-
-    final Directory appDir = await getApplicationDocumentsDirectory();
-    final String path = join(appDir.path, _databaseName);
-    ServiceLocator.log.d('DatabaseHelper: 数据库路径: $path');
-
-    _database = await openDatabase(
-      path,
-      version: _databaseVersion,
-      onCreate: _onCreate,
-      onUpgrade: _onUpgrade,
-    );
-
-    // 检查台标表是否为空，如果为空则导入数据
-    await _ensureChannelLogosImported();
-
-    final initTime = DateTime.now().difference(startTime).inMilliseconds;
-    ServiceLocator.log.d('DatabaseHelper: 数据库初始化完成，耗时: ${initTime}ms');
-  }
-
-  /// 确保台标数据已导入
-  Future<void> _ensureChannelLogosImported() async {
-    try {
-      final result = await _database!
-          .rawQuery('SELECT COUNT(*) as count FROM channel_logos');
-      final count = result.first['count'] as int;
-
-      ServiceLocator.log.d('🔍 DatabaseHelper: 台标表当前有 $count 条数据');
-
-      if (count == 0) {
-        ServiceLocator.log.d('DatabaseHelper: 台标表为空，开始导入数据');
-        await _importChannelLogos(_database!);
-      } else {
-        ServiceLocator.log.d('DatabaseHelper: 台标表已有 $count 条数据，跳过导入');
-      }
-    } catch (e) {
-      ServiceLocator.log.e('DatabaseHelper: 检查台标数据失败: $e');
-    }
-  }
-
-  Future<void> _onCreate(Database db, int version) async {
-    // Playlists table
-    await db.execute('''
-      CREATE TABLE playlists (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        url TEXT,
-        file_path TEXT,
-        epg_url TEXT,
-        is_active INTEGER DEFAULT 1,
-        last_updated INTEGER,
-        channel_count INTEGER DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        backup_path TEXT,
-        last_backup_time INTEGER
-      )
-    ''');
-
-    // Channels table
-    await db.execute('''
-      CREATE TABLE channels (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        playlist_id INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        url TEXT NOT NULL,
-        sources TEXT,
-        logo_url TEXT,
-        fallback_logo_url TEXT,
-        group_name TEXT,
-        epg_id TEXT,
-        is_active INTEGER DEFAULT 1,
-        created_at INTEGER NOT NULL,
-        catchup TEXT,
-        catchup_source TEXT,
-        catchup_days INTEGER,
-        FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
-      )
-    ''');
-
-    // Favorites table
-    await db.execute('''
-      CREATE TABLE favorites (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        channel_id INTEGER NOT NULL,
-        position INTEGER DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
-      )
-    ''');
-
-    // Watch history table
-    await db.execute('''
-      CREATE TABLE watch_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        channel_id INTEGER NOT NULL,
-        channel_name TEXT,
-        channel_url TEXT,
-        playlist_id INTEGER NOT NULL,
-        watched_at INTEGER NOT NULL,
-        duration_seconds INTEGER DEFAULT 0,
-        FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
-        FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
-      )
-    ''');
-
-    // EPG data table
-    await db.execute('''
-      CREATE TABLE epg_data (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        channel_epg_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        description TEXT,
-        start_time INTEGER NOT NULL,
-        end_time INTEGER NOT NULL,
-        category TEXT,
-        created_at INTEGER NOT NULL
-      )
-    ''');
-
-    // Create indexes for better performance
-    await db
-        .execute('CREATE INDEX idx_channels_playlist ON channels(playlist_id)');
-    await db.execute('CREATE INDEX idx_channels_group ON channels(group_name)');
-    await db
-        .execute('CREATE INDEX idx_favorites_channel ON favorites(channel_id)');
-    await db.execute(
-        'CREATE INDEX idx_history_channel ON watch_history(channel_id)');
-    await db.execute(
-        'CREATE INDEX idx_history_playlist ON watch_history(playlist_id)');
-    await db
-        .execute('CREATE INDEX idx_epg_channel ON epg_data(channel_epg_id)');
-    await db
-        .execute('CREATE INDEX idx_epg_time ON epg_data(start_time, end_time)');
-
-    // Channel logos table
-    await db.execute('''
-      CREATE TABLE channel_logos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        channel_name TEXT NOT NULL,
-        logo_url TEXT NOT NULL,
-        search_keys TEXT,
-        created_at INTEGER NOT NULL
-      )
-    ''');
-    await db.execute(
-        'CREATE INDEX idx_channel_logos_name ON channel_logos(channel_name)');
-
-    // Import channel logos from SQL script
-    await _importChannelLogos(db);
-  }
-
-  /// Import channel logos from SQL script
-  Future<void> _importChannelLogos(Database db) async {
-    try {
-      ServiceLocator.log.d('DatabaseHelper: 开始导入台标数据');
-      final startTime = DateTime.now();
-
-      // Load SQL script from assets
-      final sqlScript =
-          await rootBundle.loadString('assets/sql/channel_logos.sql');
-
-      // Split into individual statements
-      final statements = sqlScript
-          .split('\n')
-          .where((line) => line.trim().startsWith('INSERT'))
-          .toList();
-
-      ServiceLocator.log
-          .d('DatabaseHelper: 准备执行 ${statements.length} 条 SQL 语句');
-
-      // Execute in batches for better performance
-      const batchSize = 100;
-      for (var i = 0; i < statements.length; i += batchSize) {
-        final batch = db.batch();
-        final end = (i + batchSize < statements.length)
-            ? i + batchSize
-            : statements.length;
-
-        for (var j = i; j < end; j++) {
-          batch.rawInsert(statements[j]);
+    // 加载分屏频道ID列表
+    final multiScreenChannelsJson =
+        prefs.getString(_keyLastMultiScreenChannels);
+    if (multiScreenChannelsJson != null) {
+      try {
+        final List<dynamic> decoded = List<dynamic>.from(multiScreenChannelsJson
+            .split(',')
+            .map((s) => s.isEmpty ? null : int.tryParse(s)));
+        _lastMultiScreenChannels = decoded.map((e) => e as int?).toList();
+        while (_lastMultiScreenChannels.length < 4) {
+          _lastMultiScreenChannels.add(null);
         }
-
-        await batch.commit(noResult: true);
-      }
-
-      final duration = DateTime.now().difference(startTime).inMilliseconds;
-      ServiceLocator.log.d(
-          'DatabaseHelper: 台标数据导入完成，共 ${statements.length} 条记录，耗时 ${duration}ms');
-    } catch (e) {
-      ServiceLocator.log.e('DatabaseHelper: 台标数据导入失败: $e');
-    }
-  }
-
-  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    if (oldVersion < 2) {
-      // Add channel_count column to playlists table
-      try {
-        await db.execute(
-            'ALTER TABLE playlists ADD COLUMN channel_count INTEGER DEFAULT 0');
-      } catch (e) {
-        // Ignore if column already exists
-        ServiceLocator.log.d('Migration error (ignored): $e');
+      } catch (_) {
+        _lastMultiScreenChannels = [null, null, null, null];
       }
     }
-    if (oldVersion < 3) {
-      // Add sources column to channels table for multi-source support
-      try {
-        await db.execute('ALTER TABLE channels ADD COLUMN sources TEXT');
-      } catch (e) {
-        // Ignore if column already exists
-        ServiceLocator.log.d('Migration error (ignored): $e');
-      }
-    }
-    if (oldVersion < 4) {
-      // Add epg_url column to playlists table
-      try {
-        await db.execute('ALTER TABLE playlists ADD COLUMN epg_url TEXT');
-      } catch (e) {
-        // Ignore if column already exists
-        ServiceLocator.log.d('Migration error (ignored): $e');
-      }
-    }
-    if (oldVersion < 5) {
-      // Create channel_logos table
-      try {
-        await db.execute('''
-          CREATE TABLE IF NOT EXISTS channel_logos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_name TEXT NOT NULL,
-            logo_url TEXT NOT NULL,
-            search_keys TEXT,
-            created_at INTEGER NOT NULL
-          )
-        ''');
-        await db.execute(
-            'CREATE INDEX IF NOT EXISTS idx_channel_logos_name ON channel_logos(channel_name)');
 
-        // Import channel logos data
-        await _importChannelLogos(db);
-      } catch (e) {
-        ServiceLocator.log.d('Migration error (ignored): $e');
-      }
-    }
-    if (oldVersion < 6) {
-      // Add playlist_id column to watch_history table
+    final multiScreenSourceIndexesStr =
+        prefs.getString(_keyLastMultiScreenSourceIndexes);
+    if (multiScreenSourceIndexesStr != null) {
       try {
-        await db.execute(
-            'ALTER TABLE watch_history ADD COLUMN playlist_id INTEGER');
-        await db.execute(
-            'CREATE INDEX IF NOT EXISTS idx_history_playlist ON watch_history(playlist_id)');
-
-        // Update existing records to use the first available playlist_id
-        final playlists = await db.query('playlists', limit: 1);
-        if (playlists.isNotEmpty) {
-          final firstPlaylistId = playlists.first['id'];
-          await db.update(
-            'watch_history',
-            {'playlist_id': firstPlaylistId},
-            where: 'playlist_id IS NULL',
-          );
+        final parsed = multiScreenSourceIndexesStr
+            .split(',')
+            .map((s) => int.tryParse(s) ?? 0)
+            .toList();
+        _lastMultiScreenSourceIndexes = parsed.take(4).toList();
+        while (_lastMultiScreenSourceIndexes.length < 4) {
+          _lastMultiScreenSourceIndexes.add(0);
         }
-      } catch (e) {
-        ServiceLocator.log.d('Migration error (ignored): $e');
+      } catch (_) {
+        _lastMultiScreenSourceIndexes = [0, 0, 0, 0];
       }
     }
-    if (oldVersion < 7) {
-      // Add fallback_logo_url column to channels table
-      try {
-        await db
-            .execute('ALTER TABLE channels ADD COLUMN fallback_logo_url TEXT');
-        ServiceLocator.log.i('数据库迁移: 添加 fallback_logo_url 字段到 channels 表');
-      } catch (e) {
-        ServiceLocator.log.d('Migration error (ignored): $e');
-      }
+
+    // 加载配色方案设置
+    _darkColorScheme = prefs.getString(_keyDarkColorScheme) ?? 'ocean';
+    _lightColorScheme = prefs.getString(_keyLightColorScheme) ?? 'sky';
+
+    // 加载字体设置
+    _fontFamily = prefs.getString(_keyFontFamily) ?? 'System';
+
+    // 加载简单菜单设置
+    _simpleMenu = prefs.getBool(_keySimpleMenu) ?? true;
+
+    // 加载日志级别设置
+    _logLevel = prefs.getString(_keyLogLevel) ?? 'off';
+
+    // 加载手机端屏幕方向设置
+    _mobileOrientation = prefs.getString(_keyMobileOrientation) ?? 'portrait';
+
+    // 加载首页显示设置
+    _showWatchHistoryOnHome =
+        prefs.getBool(_keyShowWatchHistoryOnHome) ?? false;
+    _showFavoritesOnHome = prefs.getBool(_keyShowFavoritesOnHome) ?? false;
+
+    // 加载 User-Agent 设置
+    _userAgent = prefs.getString(_keyUserAgent) ?? defaultUserAgent;
+    _showUserAgent = prefs.getBool(_keyShowUserAgent) ?? false;
+    _pageTransitionAnimation =
+        prefs.getString(_keyPageTransitionAnimation) ?? 'fade';
+
+    // 加载去交错设置
+    _deinterlaceEnabled = prefs.getBool(_keyDeinterlaceEnabled) ?? true;
+
+    // 加载台标缓存设置
+    _logoCacheEnabled = prefs.getBool(_keyLogoCacheEnabled) ?? true;
+    _logoCacheDays = prefs.getInt(_keyLogoCacheDays) ?? 7;
+    _logoCacheMaxObjects = prefs.getInt(_keyLogoCacheMaxObjects) ?? 500;
+
+    // 加载网页日志设置
+    _webLogEnabled = prefs.getBool(_keyWebLogEnabled) ?? false;
+
+    // 同步到 LogoCacheService
+    try {
+      ServiceLocator.logoCache.updateConfig(
+        stalePeriod: Duration(days: _logoCacheDays),
+        maxNrOfCacheObjects: _logoCacheMaxObjects,
+        enabled: _logoCacheEnabled,
+      );
+    } catch (_) {}
+
+    // 若网页日志开关已开启，应用启动后自动拉起本地日志服务
+    if (_webLogEnabled) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _applyWebLogServer(true);
+      });
     }
-    if (oldVersion < 8) {
-      // Add backup_path and last_backup_time columns to playlists table
-      try {
-        await db.execute('ALTER TABLE playlists ADD COLUMN backup_path TEXT');
-        ServiceLocator.log.i('数据库迁移: 添加 backup_path 字段到 playlists 表');
-      } catch (e) {
-        ServiceLocator.log.d('Migration error (ignored): $e');
+
+    // 不在构造函数中调用 notifyListeners()，避免 build 期间触发重建
+  }
+
+  /// 检测版本更新，如果版本更新则自动关闭开发者日志
+  Future<void> _checkVersionUpdate() async {
+    try {
+      final prefs = ServiceLocator.prefs;
+      final lastVersion = prefs.getString(_keyLastAppVersion);
+
+      // 获取当前版本号
+      final packageInfo = await PackageInfo.fromPlatform();
+      final currentVersion = packageInfo.version;
+
+      // 如果版本不同，说明应用更新了
+      if (lastVersion != null && lastVersion != currentVersion) {
+        ServiceLocator.log.d('检测到版本更新: $lastVersion → $currentVersion');
+
+        // 自动关闭开发者日志
+        if (_logLevel != 'off') {
+          ServiceLocator.log.d('自动关闭开发者日志');
+          await setLogLevel('off');
+        }
       }
 
-      try {
-        await db.execute(
-            'ALTER TABLE playlists ADD COLUMN last_backup_time INTEGER');
-        ServiceLocator.log.i('数据库迁移: 添加 last_backup_time 字段到 playlists 表');
-      } catch (e) {
-        ServiceLocator.log.d('Migration error (ignored): $e');
-      }
-    }
-    if (oldVersion < 9) {
-      // Add catchup columns to channels table
-      try {
-        await db.execute('ALTER TABLE channels ADD COLUMN catchup TEXT');
-        await db.execute('ALTER TABLE channels ADD COLUMN catchup_source TEXT');
-        await db
-            .execute('ALTER TABLE channels ADD COLUMN catchup_days INTEGER');
-        ServiceLocator.log.i('数据库迁移: 添加 catchup 相关字段到 channels 表');
-      } catch (e) {
-        ServiceLocator.log.d('Migration error (ignored): $e');
-      }
+      // 保存当前版本号
+      await prefs.setString(_keyLastAppVersion, currentVersion);
+    } catch (e) {
+      ServiceLocator.log.e('版本检测失败: $e');
     }
   }
 
-  Database get db {
-    if (_database == null) {
-      throw StateError('Database not initialized. Call initialize() first.');
+  Future<void> _saveSettings() async {
+    final prefs = ServiceLocator.prefs;
+
+    await prefs.setString(_keyThemeMode, _themeMode);
+    await prefs.setBool(_keyAutoRefresh, _autoRefresh);
+    await prefs.setInt(_keyRefreshInterval, _refreshInterval);
+    await prefs.setString(_keyDefaultQuality, _defaultQuality);
+    await prefs.setBool(_keyHardwareDecoding, _hardwareDecoding);
+    await prefs.setString(_keyDecodingMode, _decodingMode);
+    await prefs.setString(_keyWindowsHwdecMode, _windowsHwdecMode);
+    await prefs.setString(_keyD3d11vppMode, _d3d11vppMode);
+    await prefs.setBool(_keyAllowSoftwareFallback, _allowSoftwareFallback);
+    await prefs.setString(_keyVideoOutput, _videoOutput);
+    await prefs.setString(_keyChannelMergeRule, _channelMergeRule);
+    await prefs.setInt(_keyBufferSize, _bufferSize);
+    if (_lastPlaylistId != null) {
+      await prefs.setInt(_keyLastPlaylistId, _lastPlaylistId!);
     }
-    return _database!;
-  }
-
-  Future<void> close() async {
-    ServiceLocator.log.i('关闭数据库连接', tag: 'DatabaseHelper');
-    if (_database != null) {
-      try {
-        // 在关闭前执行 WAL checkpoint，确保所有数据写入主数据库文件
-        ServiceLocator.log.d('执行 WAL checkpoint', tag: 'DatabaseHelper');
-        await _database!.execute('PRAGMA wal_checkpoint(TRUNCATE)');
-        ServiceLocator.log.d('WAL checkpoint 完成', tag: 'DatabaseHelper');
-      } catch (e) {
-        ServiceLocator.log.w('WAL checkpoint 失败（可能不是 WAL 模式）',
-            tag: 'DatabaseHelper', error: e);
-      }
-
-      await _database!.close();
-      _database = null;
-      ServiceLocator.log.i('数据库连接已关闭', tag: 'DatabaseHelper');
+    await prefs.setBool(_keyEnableEpg, _enableEpg);
+    if (_epgUrl != null) {
+      await prefs.setString(_keyEpgUrl, _epgUrl!);
+    }
+    await prefs.setBool(_keyParentalControl, _parentalControl);
+    if (_parentalPin != null) {
+      await prefs.setString(_keyParentalPin, _parentalPin!);
+    }
+    await prefs.setBool(_keyAutoPlay, _autoPlay);
+    await prefs.setBool(_keyRememberLastChannel, _rememberLastChannel);
+    if (_lastChannelId != null) {
+      await prefs.setInt(_keyLastChannelId, _lastChannelId!);
+    }
+    if (_locale != null) {
+      await prefs.setString(_keyLocale, _locale!.languageCode);
     } else {
-      ServiceLocator.log.d('数据库连接已经是关闭状态', tag: 'DatabaseHelper');
+      await prefs.remove(_keyLocale);
+    }
+    await prefs.setBool(_keyVolumeNormalization, _volumeNormalization);
+    await prefs.setInt(_keyVolumeBoost, _volumeBoost);
+    await prefs.setString(_keyBufferStrength, _bufferStrength);
+    await prefs.setBool(_keyShowFps, _showFps);
+    await prefs.setBool(_keyShowClock, _showClock);
+    await prefs.setBool(_keyShowNetworkSpeed, _showNetworkSpeed);
+    await prefs.setBool(_keyShowVideoInfo, _showVideoInfo);
+    await prefs.setString(_keyProgressBarMode, _progressBarMode);
+    await prefs.setBool(_keyEnableMultiScreen, _enableMultiScreen);
+    await prefs.setInt(_keyDefaultScreenPosition, _defaultScreenPosition);
+    await prefs.setInt(_keyActiveScreenIndex, _activeScreenIndex);
+    await prefs.setString(_keyLastPlayMode, _lastPlayMode);
+    await prefs.setString(_keyLastMultiScreenChannels,
+        _lastMultiScreenChannels.map((e) => e?.toString() ?? '').join(','));
+    await prefs.setString(_keyLastMultiScreenSourceIndexes,
+        _lastMultiScreenSourceIndexes.map((e) => e.toString()).join(','));
+    await prefs.setBool(
+        _keyShowMultiScreenChannelName, _showMultiScreenChannelName);
+    await prefs.setInt(_keySeekStepSeconds, _seekStepSeconds);
+    await prefs.setString(_keyDarkColorScheme, _darkColorScheme);
+    await prefs.setString(_keyLightColorScheme, _lightColorScheme);
+    await prefs.setString(_keyFontFamily, _fontFamily);
+    await prefs.setBool(_keySimpleMenu, _simpleMenu);
+    await prefs.setString(_keyLogLevel, _logLevel);
+    await prefs.setString(_keyMobileOrientation, _mobileOrientation);
+    await prefs.setBool(_keyShowWatchHistoryOnHome, _showWatchHistoryOnHome);
+    await prefs.setBool(_keyShowFavoritesOnHome, _showFavoritesOnHome);
+    await prefs.setString(_keyUserAgent, _userAgent);
+    await prefs.setBool(_keyShowUserAgent, _showUserAgent);
+    await prefs.setString(
+        _keyPageTransitionAnimation, _pageTransitionAnimation);
+    await prefs.setBool(_keyDeinterlaceEnabled, _deinterlaceEnabled);
+    await prefs.setBool(_keyLogoCacheEnabled, _logoCacheEnabled);
+    await prefs.setInt(_keyLogoCacheDays, _logoCacheDays);
+    await prefs.setInt(_keyLogoCacheMaxObjects, _logoCacheMaxObjects);
+    await prefs.setBool(_keyWebLogEnabled, _webLogEnabled);
+  }
+
+  // Setters with persistence
+  Future<void> setThemeMode(String mode) async {
+    _themeMode = mode;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setAutoRefresh(bool value) async {
+    _autoRefresh = value;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setRefreshInterval(int hours) async {
+    _refreshInterval = hours;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setDefaultQuality(String quality) async {
+    _defaultQuality = quality;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setHardwareDecoding(bool enabled) async {
+    _hardwareDecoding = enabled;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setDecodingMode(String mode) async {
+    _decodingMode = mode;
+    // Also update hardwareDecoding based on mode for backward compatibility
+    _hardwareDecoding = mode != 'software';
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setWindowsHwdecMode(String mode) async {
+    _windowsHwdecMode = mode;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setD3d11vppMode(String mode) async {
+    _d3d11vppMode = mode;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setAllowSoftwareFallback(bool enabled) async {
+    _allowSoftwareFallback = enabled;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setVideoOutput(String output) async {
+    _videoOutput = output;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setChannelMergeRule(String rule) async {
+    _channelMergeRule = rule;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setBufferSize(int seconds) async {
+    _bufferSize = seconds;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setLastPlaylistId(int? id) async {
+    _lastPlaylistId = id;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setEnableEpg(bool enabled) async {
+    _enableEpg = enabled;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setEpgUrl(String? url) async {
+    _epgUrl = url;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setParentalControl(bool enabled) async {
+    _parentalControl = enabled;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setParentalPin(String? pin) async {
+    _parentalPin = pin;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  bool validateParentalPin(String pin) {
+    return _parentalPin == pin;
+  }
+
+  Future<void> setAutoPlay(bool enabled) async {
+    _autoPlay = enabled;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setRememberLastChannel(bool enabled) async {
+    _rememberLastChannel = enabled;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setLastChannelId(int? id) async {
+    _lastChannelId = id;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setLocale(Locale? locale) async {
+    _locale = locale;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setVolumeNormalization(bool enabled) async {
+    _volumeNormalization = enabled;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setVolumeBoost(int db) async {
+    _volumeBoost = db.clamp(-20, 20);
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setBufferStrength(String strength) async {
+    _bufferStrength = strength;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setShowFps(bool show) async {
+    _showFps = show;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setShowClock(bool show) async {
+    _showClock = show;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setShowNetworkSpeed(bool show) async {
+    _showNetworkSpeed = show;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setShowVideoInfo(bool show) async {
+    _showVideoInfo = show;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  Future<void> setProgressBarMode(String mode) async {
+    if (mode == 'auto' || mode == 'always' || mode == 'never') {
+      _progressBarMode = mode;
+      await _saveSettings();
+      notifyListeners();
     }
   }
 
-  // Generic CRUD operations
-  Future<int> insert(String table, Map<String, dynamic> data) async {
-    return await db.insert(table, data);
+  Future<void> setEnableMultiScreen(bool enabled) async {
+    _enableMultiScreen = enabled;
+    await _saveSettings();
+    notifyListeners();
   }
 
-  Future<List<Map<String, dynamic>>> query(
-    String table, {
-    String? where,
-    List<Object?>? whereArgs,
-    String? orderBy,
-    int? limit,
-    int? offset,
-  }) async {
-    return await db.query(
-      table,
-      where: where,
-      whereArgs: whereArgs,
-      orderBy: orderBy,
-      limit: limit,
-      offset: offset,
-    );
+  Future<void> setDefaultScreenPosition(int position) async {
+    _defaultScreenPosition = position.clamp(1, 4);
+    await _saveSettings();
+    notifyListeners();
   }
 
-  Future<int> update(
-    String table,
-    Map<String, dynamic> data, {
-    String? where,
-    List<Object?>? whereArgs,
-  }) async {
-    return await db.update(table, data, where: where, whereArgs: whereArgs);
+  Future<void> setActiveScreenIndex(int index) async {
+    _activeScreenIndex = index.clamp(0, 3);
+    await _saveSettings();
+    notifyListeners();
   }
 
-  Future<int> delete(
-    String table, {
-    String? where,
-    List<Object?>? whereArgs,
-  }) async {
-    return await db.delete(table, where: where, whereArgs: whereArgs);
+  /// 设置多屏播放是否显示频道名称
+  Future<void> setShowMultiScreenChannelName(bool show) async {
+    ServiceLocator.log
+        .d('SettingsProvider: setShowMultiScreenChannelName($show)');
+    _showMultiScreenChannelName = show;
+    await _saveSettings();
+    notifyListeners();
   }
 
-  Future<List<Map<String, dynamic>>> rawQuery(String sql,
-      [List<Object?>? arguments]) async {
-    return await db.rawQuery(sql, arguments);
-  }
-
-  Batch batch() => db.batch();
-
-  /// Optimize database by reclaiming unused space
-  /// This should be called periodically or after large deletions
-  Future<void> vacuum() async {
-    try {
-      ServiceLocator.log.d('开始执行 VACUUM 优化数据库');
-      final startTime = DateTime.now();
-
-      await db.execute('VACUUM');
-
-      final duration = DateTime.now().difference(startTime).inMilliseconds;
-      ServiceLocator.log.d('VACUUM 完成，耗时: ${duration}ms');
-    } catch (e) {
-      ServiceLocator.log.e('VACUUM 执行失败', error: e);
-      rethrow;
+  /// 设置快进/快退跨度（秒）
+  Future<void> setSeekStepSeconds(int seconds) async {
+    if (seconds == 5 ||
+        seconds == 10 ||
+        seconds == 30 ||
+        seconds == 60 ||
+        seconds == 120) {
+      _seekStepSeconds = seconds;
+      await _saveSettings();
+      notifyListeners();
     }
   }
 
-  /// Get database file size in bytes
-  Future<int> getDatabaseSize() async {
-    try {
-      final Directory appDir = await getApplicationDocumentsDirectory();
-      final String path = join(appDir.path, _databaseName);
-      final file = File(path);
+  /// 设置上次播放模式
+  Future<void> setLastPlayMode(String mode) async {
+    _lastPlayMode = mode;
+    await _saveSettings();
+    notifyListeners();
+  }
 
-      if (await file.exists()) {
-        return await file.length();
+  /// 设置分屏频道ID列表
+  Future<void> setLastMultiScreenChannels(List<int?> channelIds) async {
+    _lastMultiScreenChannels = List<int?>.from(channelIds);
+    while (_lastMultiScreenChannels.length < 4) {
+      _lastMultiScreenChannels.add(null);
+    }
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 保存单频道播放状态
+  Future<void> saveLastSingleChannel(int? channelId) async {
+    _lastPlayMode = 'single';
+    if (channelId != null) {
+      _lastChannelId = channelId;
+    }
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 保存分屏播放状态
+  Future<void> saveLastMultiScreen(List<int?> channelIds, int activeIndex,
+      {List<int>? sourceIndexes}) async {
+    _lastPlayMode = 'multi';
+    _lastMultiScreenChannels = List<int?>.from(channelIds);
+    while (_lastMultiScreenChannels.length < 4) {
+      _lastMultiScreenChannels.add(null);
+    }
+    _lastMultiScreenSourceIndexes =
+        List<int>.from(sourceIndexes ?? _lastMultiScreenSourceIndexes);
+    while (_lastMultiScreenSourceIndexes.length < 4) {
+      _lastMultiScreenSourceIndexes.add(0);
+    }
+    _lastMultiScreenSourceIndexes = _lastMultiScreenSourceIndexes
+        .take(4)
+        .map((e) => e < 0 ? 0 : e)
+        .toList();
+    _activeScreenIndex = activeIndex.clamp(0, 3);
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 检查是否有分屏状态可恢复
+  bool get hasMultiScreenState {
+    return _lastPlayMode == 'multi' &&
+        _lastMultiScreenChannels.any((id) => id != null);
+  }
+
+  /// 设置黑暗模式配色方案
+  Future<void> setDarkColorScheme(String scheme) async {
+    ServiceLocator.log.d('SettingsProvider: 设置黑暗配色方案 - $scheme');
+    _darkColorScheme = scheme;
+    await _saveSettings();
+    ServiceLocator.log.d('SettingsProvider: 配色方案已保存，通知监听者');
+    notifyListeners();
+  }
+
+  /// 设置明亮模式配色方案
+  Future<void> setLightColorScheme(String scheme) async {
+    ServiceLocator.log.d('SettingsProvider: 设置明亮配色方案 - $scheme');
+    _lightColorScheme = scheme;
+    await _saveSettings();
+    ServiceLocator.log.d('SettingsProvider: 配色方案已保存，通知监听者');
+    notifyListeners();
+  }
+
+  /// 设置字体
+  Future<void> setFontFamily(String fontFamily) async {
+    ServiceLocator.log.d('SettingsProvider: 设置字体 - $fontFamily');
+    _fontFamily = fontFamily;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 设置简单菜单栏
+  Future<void> setSimpleMenu(bool value) async {
+    ServiceLocator.log.d('SettingsProvider: 设置简单菜单栏 - $value');
+    _simpleMenu = value;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 设置日志级别
+  Future<void> setLogLevel(String level) async {
+    debugPrint('SettingsProvider: 开始设置日志级别 - $level');
+    _logLevel = level;
+    await _saveSettings();
+
+    // 更新日志服务
+    final logLevel = switch (level) {
+      'debug' => LogLevel.debug,
+      'release' => LogLevel.release,
+      'off' => LogLevel.off,
+      _ => LogLevel.release,
+    };
+
+    debugPrint(
+        'SettingsProvider: 调用 ServiceLocator.log.setLogLevel($logLevel)');
+    await ServiceLocator.log.setLogLevel(logLevel);
+
+    // 写入测试日志
+    debugPrint('SettingsProvider: 写入测试日志...');
+    ServiceLocator.log.d('测试日志：日志级别已切换到 $level');
+    ServiceLocator.log.i('测试日志：Info 级别');
+    ServiceLocator.log.w('测试日志：Warning 级别');
+
+    // 强制刷新日志缓冲区
+    await ServiceLocator.log.flush();
+    debugPrint('SettingsProvider: 日志缓冲区已刷新');
+
+    notifyListeners();
+  }
+
+  /// 设置手机端屏幕方向
+  Future<void> setMobileOrientation(String orientation) async {
+    ServiceLocator.log.d('SettingsProvider: 设置手机端屏幕方向 - $orientation');
+    _mobileOrientation = orientation;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 设置首页是否显示观看记录
+  Future<void> setShowWatchHistoryOnHome(bool show) async {
+    ServiceLocator.log.d('SettingsProvider: 设置首页显示观看记录 - $show');
+    _showWatchHistoryOnHome = show;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 设置 User-Agent
+  Future<void> setUserAgent(String userAgent) async {
+    ServiceLocator.log.d('SettingsProvider: 设置 User-Agent - $userAgent');
+    _userAgent = userAgent;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 重置 User-Agent 为默认值
+  Future<void> resetUserAgent() async {
+    await setUserAgent(defaultUserAgent);
+  }
+
+  /// 设置是否在播放器OSD显示User-Agent
+  Future<void> setShowUserAgent(bool show) async {
+    ServiceLocator.log.d('SettingsProvider: 设置显示User-Agent - $show');
+    _showUserAgent = show;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 设置页面切换动画
+  Future<void> setPageTransitionAnimation(String animation) async {
+    _pageTransitionAnimation = animation;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 设置去交错（反隔行）开关
+  Future<void> setDeinterlaceEnabled(bool enabled) async {
+    ServiceLocator.log.d('SettingsProvider: 设置去交错开关 - $enabled');
+    _deinterlaceEnabled = enabled;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 设置首页是否显示收藏夹
+  Future<void> setShowFavoritesOnHome(bool show) async {
+    ServiceLocator.log.d('SettingsProvider: 设置首页显示收藏夹 - $show');
+    _showFavoritesOnHome = show;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 设置台标图片缓存开关
+  Future<void> setLogoCacheEnabled(bool enabled) async {
+    ServiceLocator.log.d('SettingsProvider: 设置台标缓存开关 - $enabled');
+    _logoCacheEnabled = enabled;
+    await _saveSettings();
+    // 同步到 LogoCacheService 并重建 CacheManager
+    try {
+      await ServiceLocator.logoCache.updateConfig(enabled: enabled);
+      resetLogoCacheManager();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  /// 设置台标缓存保留天数
+  Future<void> setLogoCacheDays(int days) async {
+    // 合法值：1, 3, 7, 14, 30, 60, 90
+    const allowedDays = [1, 3, 7, 14, 30, 60, 90];
+    if (!allowedDays.contains(days)) return;
+    ServiceLocator.log.d('SettingsProvider: 设置台标缓存天数 - $days天');
+    _logoCacheDays = days;
+    await _saveSettings();
+    try {
+      await ServiceLocator.logoCache
+          .updateConfig(stalePeriod: Duration(days: days));
+      resetLogoCacheManager();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  /// 设置台标最大缓存条数
+  Future<void> setLogoCacheMaxObjects(int count) async {
+    // 合法值：200, 500, 1000, 2000, 5000
+    const allowedCounts = [200, 500, 1000, 2000, 5000];
+    if (!allowedCounts.contains(count)) return;
+    ServiceLocator.log.d('SettingsProvider: 设置台标最大缓存条数 - $count');
+    _logoCacheMaxObjects = count;
+    await _saveSettings();
+    try {
+      await ServiceLocator.logoCache
+          .updateConfig(maxNrOfCacheObjects: count);
+      resetLogoCacheManager();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  /// 设置网页日志服务开关
+  Future<void> setWebLogEnabled(bool enabled) async {
+    ServiceLocator.log.d('SettingsProvider: 设置网页日志 - $enabled');
+    _webLogEnabled = enabled;
+    await _saveSettings();
+    _applyWebLogServer(enabled);
+    notifyListeners();
+  }
+
+  /// 根据开关状态启停本地日志服务器（网页日志）
+  void _applyWebLogServer(bool enabled) {
+    final server = LocalServerService();
+    if (enabled) {
+      // 设置动态日志提供者，使 /logs 每次请求实时读取最新日志
+      server.logContentProvider = _buildWebLogContent;
+      server.start().then((ok) {
+        if (!ok) {
+          ServiceLocator.log
+              .w('网页日志服务器启动失败: ${server.lastError}', tag: 'WebLog');
+        }
+      });
+    } else {
+      server.logContentProvider = null;
+      server.stop();
+    }
+  }
+
+  /// 生成网页日志内容（合并当前所有日志文件）
+  Future<String> _buildWebLogContent() async {
+    try {
+      await ServiceLocator.log.flush();
+      final files = await ServiceLocator.log.getLogFiles();
+      if (files.isEmpty) return '没有可用的日志内容';
+
+      final buffer = StringBuffer();
+      buffer.writeln('========================================');
+      buffer.writeln('Lotus IPTV 实时日志 (${DateTime.now()})');
+      buffer.writeln('========================================\n');
+      for (final file in files) {
+        buffer.writeln(
+            '\n========== ${file.path.split('/').last.split('\\').last} ==========\n');
+        buffer.writeln(await file.readAsString());
       }
-      return 0;
+      return buffer.toString();
     } catch (e) {
-      ServiceLocator.log.e('获取数据库大小失败', error: e);
-      return 0;
+      return '读取日志失败: $e';
     }
+  }
+
+  // Reset all settings to defaults
+  Future<void> resetSettings() async {
+    _themeMode = 'dark';
+    _autoRefresh = false;
+    _refreshInterval = 24;
+    _defaultQuality = 'auto';
+    _hardwareDecoding = true;
+    _channelMergeRule = 'name_group';
+    _decodingMode = 'auto';
+    _windowsHwdecMode = 'auto-safe';
+    _d3d11vppMode = 'bob';
+    _allowSoftwareFallback = true;
+    _videoOutput = 'auto';
+    _bufferSize = 30;
+    _enableEpg = true;
+    _epgUrl = null;
+    _parentalControl = false;
+    _parentalPin = null;
+    _autoPlay = false;
+    _rememberLastChannel = true;
+    _volumeNormalization = false;
+    _volumeBoost = 0;
+    _bufferStrength = 'fast';
+    _showFps = true;
+    _showClock = true;
+    _showNetworkSpeed = true;
+    _showVideoInfo = true;
+    _progressBarMode = 'auto';
+    _seekStepSeconds = 10;
+    _enableMultiScreen = true;
+    _defaultScreenPosition = 1;
+    _activeScreenIndex = 0;
+    _lastMultiScreenSourceIndexes = [0, 0, 0, 0];
+    _darkColorScheme = 'ocean';
+    _lightColorScheme = 'sky';
+    _fontFamily = 'System';
+    _userAgent = defaultUserAgent; // 重置 User-Agent 为默认值 Wget/1.21.3
+    _showUserAgent = false; // 重置显示User-Agent开关为关闭
+    _pageTransitionAnimation = 'fade';
+    _deinterlaceEnabled = true;
+    _logoCacheEnabled = true;
+    _logoCacheDays = 7;
+    _logoCacheMaxObjects = 500;
+    _webLogEnabled = false;
+    _applyWebLogServer(false); // 停止网页日志服务
+
+    await _saveSettings();
+
+    // 重置台标缓存配置
+    try {
+      await ServiceLocator.logoCache.updateConfig(
+        stalePeriod: const Duration(days: 7),
+        maxNrOfCacheObjects: 500,
+        enabled: true,
+      );
+      resetLogoCacheManager();
+    } catch (_) {}
+
+    // 重置日志级别为关闭（性能优化）
+    await ServiceLocator.prefs.setString('log_level', 'off');
+    await ServiceLocator.log.setLogLevel(LogLevel.off);
+
+    notifyListeners();
   }
 }
