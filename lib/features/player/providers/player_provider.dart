@@ -4,14 +4,12 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'dart:io';
 import 'dart:async';
 import 'dart:math' as math;
-import 'package:intl/intl.dart'; // 新增：用于日期格式化
 
 import '../../../core/models/channel.dart';
 import '../../../core/platform/platform_detector.dart';
 import '../../../core/services/service_locator.dart';
 import '../../../core/services/channel_test_service.dart';
 import '../../../core/services/log_service.dart';
-import '../../../core/services/epg_service.dart';
 import '../../settings/providers/settings_provider.dart';
 
 enum PlayerState {
@@ -1872,7 +1870,7 @@ class PlayerProvider extends ChangeNotifier {
     }
 
     // 解析域名获取 IP（默认优先 IPv4，但支持 IPv6 回退）
-    final ip = await _resolveDomain(host, preferIPv6: false);
+    final ip = await _resolveDomain(host, preferIPv6: true);
     if (ip == null) {
       // 解析失败，返回 null
       return null;
@@ -1976,121 +1974,6 @@ class PlayerProvider extends ChangeNotifier {
     if (ip.startsWith('::')) return true; // 未指定地址
 
     return false;
-  }
-
-  // ============ 回放 URL 生成（公开方法，供 PlayerScreen 调用） ============
-  /// 生成回放（Catchup）URL
-  /// 优先使用频道自身的 catchupSource，若为空则使用 SettingsProvider 中的全局默认模板
-  String? generateCatchupUrl(Channel channel, EpgProgram program) {
-    // 1. 获取频道的 catchup-source，若没有则使用全局默认模板
-    String? catchupSource = channel.catchupSource;
-
-    if (catchupSource == null || catchupSource.isEmpty) {
-      // 从设置获取全局默认模板
-      final defaultTemplate = ServiceLocator.settings?.defaultCatchupSource;
-      if (defaultTemplate != null && defaultTemplate.isNotEmpty) {
-        catchupSource = defaultTemplate;
-      } else {
-        // 硬编码一个最常见格式（兼容大多数 IPTV）
-        catchupSource = '?playseek=\${(b)yyyyMMddHHmmss}-\${(e)yyyyMMddHHmmss}';
-      }
-    }
-
-    // 如果仍然为空，无法生成回放 URL
-    if (catchupSource == null) {
-      return null;
-    }
-
-    final catchupMode = channel.catchup?.toLowerCase() ?? 'default';
-
-    final startLocal = program.start;
-    final endLocal = program.end;
-    final startUtc = startLocal.toUtc();
-    final endUtc = endLocal.toUtc();
-
-    final startIso = startUtc.toIso8601String();
-    final startIsoClean = startIso.replaceAll(RegExp(r'\.\d+Z$'), 'Z');
-    final endIso = endUtc.toIso8601String();
-    final endIsoClean = endIso.replaceAll(RegExp(r'\.\d+Z$'), 'Z');
-
-    var url = catchupSource;
-
-    // 处理自定义日期格式占位符（支持 ${(b)yyyyMMddHHmmss} 等）
-    final customFormatRegex = RegExp(r'\$\{\(([bBeE])([uU]?)\)([^}]+)\}');
-    final customMatches = customFormatRegex.allMatches(url);
-    for (final match in customMatches) {
-      final timeMarker = match.group(1)!.toLowerCase();
-      final tzMarker = match.group(2)!.toLowerCase();
-      final formatStr = match.group(3)!;
-      DateTime dateTime;
-      if (tzMarker == 'u') {
-        dateTime = (timeMarker == 'b') ? startUtc : endUtc;
-      } else {
-        dateTime = (timeMarker == 'b') ? startLocal : endLocal;
-      }
-      try {
-        final formatter = DateFormat(formatStr);
-        final formatted = formatter.format(dateTime);
-        url = url.replaceFirst(match.group(0)!, formatted);
-      } catch (_) {
-        // 忽略格式错误
-      }
-    }
-
-    // 处理花括号版本 {(b)yyyyMMddHHmmss}
-    final braceFormatRegex = RegExp(r'\{\(([bBeE])([uU]?)\)([^}]+)\}');
-    final braceMatches = braceFormatRegex.allMatches(url);
-    for (final match in braceMatches) {
-      final timeMarker = match.group(1)!.toLowerCase();
-      final tzMarker = match.group(2)!.toLowerCase();
-      final formatStr = match.group(3)!;
-      DateTime dateTime;
-      if (tzMarker == 'u') {
-        dateTime = (timeMarker == 'b') ? startUtc : endUtc;
-      } else {
-        dateTime = (timeMarker == 'b') ? startLocal : endLocal;
-      }
-      try {
-        final formatter = DateFormat(formatStr);
-        final formatted = formatter.format(dateTime);
-        url = url.replaceFirst(match.group(0)!, formatted);
-      } catch (_) {}
-    }
-
-    // 标准 ${start} / ${stop} / ${end} 占位符
-    url = url.replaceAll(RegExp(r'\$\{start\}'), startIsoClean);
-    url = url.replaceAll(RegExp(r'\$\{stop\}'), endIsoClean);
-    url = url.replaceAll(RegExp(r'\$\{end\}'), endIsoClean);
-
-    url = url.replaceAll(RegExp(r'\{start\}'), startIsoClean);
-    url = url.replaceAll(RegExp(r'\{stop\}'), endIsoClean);
-    url = url.replaceAll(RegExp(r'\{end\}'), endIsoClean);
-
-    // append 模式特殊处理
-    if (catchupMode == 'append') {
-      final template = catchupSource;
-      final startSec = startUtc.millisecondsSinceEpoch ~/ 1000;
-      final endSec = endUtc.millisecondsSinceEpoch ~/ 1000;
-      final replaced = template
-          .replaceAll('{utc}', startSec.toString())
-          .replaceAll('{utcend}', endSec.toString());
-      // 基础 URL 为频道原始 URL
-      return channel.url + replaced;
-    }
-
-    // 判断 catchup-source 是完整 URL 还是片段
-    final looksLikeFullUrl = catchupSource.contains('://');
-    if (!looksLikeFullUrl) {
-      var fragment = url.trimLeft();
-      if (fragment.startsWith('?') || fragment.startsWith('&')) {
-        fragment = fragment.substring(1);
-      }
-      final separator = channel.url.contains('?') ? '&' : '?';
-      return channel.url + separator + fragment;
-    }
-
-    // 完整 URL 直接返回
-    return url;
   }
 
   @override
