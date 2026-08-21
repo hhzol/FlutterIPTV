@@ -80,6 +80,9 @@ class SettingsProvider extends ChangeNotifier {
   static const String _keyLogoCacheMaxObjects = 'logo_cache_max_objects'; // 台标最大缓存条数
   static const String _keyWebLogEnabled = 'web_log_enabled'; // 网页日志开关
 
+  // ========== 新增：默认回放模板 ==========
+  static const String _keyDefaultCatchupSource = 'default_catchup_source';
+
   // Default User-Agent (same as current hardcoded value)
   static const String defaultUserAgent = 'Wget/1.21.3';
 
@@ -140,6 +143,10 @@ class SettingsProvider extends ChangeNotifier {
   int _logoCacheMaxObjects = 500; // 台标最大缓存500张图片（约 10-50MB）
   bool _webLogEnabled = false; // 网页日志服务开关 - 默认关闭
 
+  // ========== 新增字段 ==========
+  String _defaultCatchupSource =
+      '?playseek=\${(b)yyyyMMddHHmmss}-\${(e)yyyyMMddHHmmss}';
+
   // Getters
   String get themeMode => _themeMode;
   bool get autoRefresh => _autoRefresh;
@@ -193,6 +200,9 @@ class SettingsProvider extends ChangeNotifier {
   int get logoCacheDays => _logoCacheDays;
   int get logoCacheMaxObjects => _logoCacheMaxObjects;
   bool get webLogEnabled => _webLogEnabled;
+
+  // ========== 新增 Getter ==========
+  String get defaultCatchupSource => _defaultCatchupSource;
 
   /// 获取当前应该使用的配色方案
   String get currentColorScheme {
@@ -332,6 +342,10 @@ class SettingsProvider extends ChangeNotifier {
     // 加载网页日志设置
     _webLogEnabled = prefs.getBool(_keyWebLogEnabled) ?? false;
 
+    // ========== 加载默认回放模板 ==========
+    _defaultCatchupSource = prefs.getString(_keyDefaultCatchupSource) ??
+        '?playseek=\${(b)yyyyMMddHHmmss}-\${(e)yyyyMMddHHmmss}';
+
     // 同步到 LogoCacheService
     try {
       ServiceLocator.logoCache.updateConfig(
@@ -451,6 +465,9 @@ class SettingsProvider extends ChangeNotifier {
     await prefs.setInt(_keyLogoCacheDays, _logoCacheDays);
     await prefs.setInt(_keyLogoCacheMaxObjects, _logoCacheMaxObjects);
     await prefs.setBool(_keyWebLogEnabled, _webLogEnabled);
+
+    // ========== 保存默认回放模板 ==========
+    await prefs.setString(_keyDefaultCatchupSource, _defaultCatchupSource);
   }
 
   // Setters with persistence
@@ -910,6 +927,20 @@ class SettingsProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ========== 新增：设置默认回放模板 ==========
+  Future<void> setDefaultCatchupSource(String template) async {
+    ServiceLocator.log.d('SettingsProvider: 设置默认回放模板 - $template');
+    _defaultCatchupSource = template;
+    await _saveSettings();
+    notifyListeners();
+  }
+
+  /// 重置默认回放模板为内置常用模板
+  Future<void> resetDefaultCatchupSource() async {
+    const defaultTemplate = '?playseek=\${(b)yyyyMMddHHmmss}-\${(e)yyyyMMddHHmmss}';
+    await setDefaultCatchupSource(defaultTemplate);
+  }
+
   /// 根据开关状态启停本地日志服务器（网页日志）
   void _applyWebLogServer(bool enabled) {
     final server = LocalServerService();
@@ -995,6 +1026,10 @@ class SettingsProvider extends ChangeNotifier {
     _logoCacheMaxObjects = 500;
     _webLogEnabled = false;
     _applyWebLogServer(false); // 停止网页日志服务
+
+    // ========== 重置默认回放模板 ==========
+    _defaultCatchupSource =
+        '?playseek=\${(b)yyyyMMddHHmmss}-\${(e)yyyyMMddHHmmss}';
 
     await _saveSettings();
 
