@@ -1315,26 +1315,26 @@ class PlayerProvider extends ChangeNotifier {
     if (_useNativePlayer) return;
     _mediaKitPlayer?.play();
   }
-
+  
   Future<void> stop({bool silent = false}) async {
+    if (_mediaKitPlayer != null && !_useNativePlayer) {
+      await _mediaKitPlayer?.stop();
+      await _clearStartEndProperties();
+    }
     _state = PlayerState.idle;
     _error = null;
     _overrideDuration = null;
     _retryCount = 0;
     _retryTimer?.cancel();
     _isAutoDetecting = false;
-
-    if (_mediaKitPlayer != null) {
-      _mediaKitPlayer?.stop();
-    }
-    _state = PlayerState.idle;
     _currentChannel = null;
-
+    _originalChannel = null;
+    _currentCatchupProgram = null;
     if (!silent) {
       notifyListeners();
     }
   }
-
+ 
   void seek(Duration position) {
     if (_useNativePlayer) return;
     _mediaKitPlayer?.seek(position);
