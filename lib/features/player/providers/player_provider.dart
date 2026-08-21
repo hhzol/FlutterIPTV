@@ -1870,7 +1870,7 @@ class PlayerProvider extends ChangeNotifier {
     }
 
     // 解析域名获取 IP（默认优先 IPv4，但支持 IPv6 回退）
-    final ip = await _resolveDomain(host, preferIPv6: false);
+    final ip = await _resolveDomain(host, preferIPv6: true);
     if (ip == null) {
       // 解析失败，返回 null
       return null;
