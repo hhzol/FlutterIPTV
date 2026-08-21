@@ -272,9 +272,8 @@ class PlayerProvider extends ChangeNotifier {
         ServiceLocator.log
             .i('>>> Retry: start resolving redirect', tag: 'PlayerProvider');
 
-        // ---- 使用新的 _resolveWithRrsip 内部已处理重定向 ----
         final rrsipUrl = await _resolveWithRrsip(url);
-        final realUrl = rrsipUrl ?? url; // fallback 到原始 URL
+        final realUrl = rrsipUrl ?? url;
 
         ServiceLocator.log.d('>>> 重试: 使用播放地址: $realUrl', tag: 'PlayerProvider');
 
@@ -1068,20 +1067,17 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   // ============ Public API ============
+
   Future<void> playChannel(Channel channel,
       {bool preserveCurrentSource = false}) async {
-    // 彻底停止当前播放，重置状态
+    // 彻底停止当前播放，重置状态（避免卡死）
     if (_mediaKitPlayer != null && !_useNativePlayer) {
       ServiceLocator.log.d('playChannel: 停止当前播放');
       await _mediaKitPlayer?.stop();
       await _clearStartEndProperties();
-      // 重置回放相关
-      _originalChannel = null;
-      _currentCatchupProgram = null;
-      _overrideDuration = null;
     }
-  
-    // 重置所有状态
+
+    // 重置状态
     _state = PlayerState.idle;
     _error = null;
     _lastErrorMessage = null;
@@ -1091,7 +1087,7 @@ class PlayerProvider extends ChangeNotifier {
     _isAutoDetecting = false;
     _noVideoFallbackAttempted = false;
     _resetDeinterlaceDetection();
-    
+
     ServiceLocator.log
         .i('========== 开始播放频道==========', tag: 'PlayerProvider');
     ServiceLocator.log
@@ -1102,14 +1098,8 @@ class PlayerProvider extends ChangeNotifier {
 
     _currentChannel = channel;
     _state = PlayerState.loading;
-    _error = null;
-    _lastErrorMessage = null;
-    _errorDisplayed = false;
-    _retryCount = 0;
-    _retryTimer?.cancel();
-    _isAutoDetecting = false;
-    _noVideoFallbackAttempted = false;
-    _resetDeinterlaceDetection();
+    // 错误状态已清
+    _overrideDuration = null; // 清除回放时长覆盖
     loadVolumeSettings();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       notifyListeners();
@@ -1256,6 +1246,12 @@ class PlayerProvider extends ChangeNotifier {
       return;
     }
 
+    // 先停止当前播放
+    if (_mediaKitPlayer != null) {
+      await _mediaKitPlayer?.stop();
+      await _clearStartEndProperties();
+    }
+
     final startTime = DateTime.now();
     _state = PlayerState.loading;
     _error = null;
@@ -1315,7 +1311,7 @@ class PlayerProvider extends ChangeNotifier {
     if (_useNativePlayer) return;
     _mediaKitPlayer?.play();
   }
-  
+
   Future<void> stop({bool silent = false}) async {
     if (_mediaKitPlayer != null && !_useNativePlayer) {
       await _mediaKitPlayer?.stop();
@@ -1328,13 +1324,11 @@ class PlayerProvider extends ChangeNotifier {
     _retryTimer?.cancel();
     _isAutoDetecting = false;
     _currentChannel = null;
-    _originalChannel = null;
-    _currentCatchupProgram = null;
     if (!silent) {
       notifyListeners();
     }
   }
- 
+
   void seek(Duration position) {
     if (_useNativePlayer) return;
     _mediaKitPlayer?.seek(position);
@@ -1575,20 +1569,18 @@ class PlayerProvider extends ChangeNotifier {
   /// 如果转换失败返回 null。
   Future<String?> _resolveWithRrsip(String url) async {
     try {
+      // 增加超时，防止卡死
       final finalUrl = await ServiceLocator.redirectCache.resolveRealPlayUrl(url)
           .timeout(const Duration(seconds: 10));
       final uri = Uri.parse(finalUrl);
 
-      // 如果已经是 IP 直连且带有 rrsip，无需转换
       if (_isIP(uri.host) && uri.queryParameters.containsKey('rrsip')) {
         return finalUrl;
       }
 
-      // 原始域名（用于 rrsip 参数）
       final originalUri = Uri.parse(url);
       final originalHost = originalUri.host;
 
-      // 如果最终主机已经是 IP，则无需转换，但需要确保 rrsip 参数存在
       if (_isIP(uri.host)) {
         if (!uri.queryParameters.containsKey('rrsip')) {
           final newUri = uri.replace(
@@ -1602,13 +1594,11 @@ class PlayerProvider extends ChangeNotifier {
         return finalUrl;
       }
 
-      // 解析最终主机（域名）的 IP
       final ip = await _resolveDomain(uri.host);
       if (ip == null) {
         return null;
       }
 
-      // 构造新 URL：用 IP 替换主机，保留原查询参数，添加 rrsip
       final newUri = uri.replace(
         host: ip,
         queryParameters: {
@@ -1618,7 +1608,7 @@ class PlayerProvider extends ChangeNotifier {
       );
       return newUri.toString();
     } on TimeoutException {
-      ServiceLocator.log.w('_resolveWithRrsip 超时');
+      ServiceLocator.log.w('_resolveWithRrsip 超时，返回 null');
       return null;
     } catch (e) {
       ServiceLocator.log.w('_resolveWithRrsip 失败: $e');
