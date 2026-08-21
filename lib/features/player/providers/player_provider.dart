@@ -335,8 +335,14 @@ class PlayerProvider extends ChangeNotifier {
         // 解析真实播放地址（处理 302 重定向）
         final redirectStartTime = DateTime.now();
 
-        final realUrl =
-            await ServiceLocator.redirectCache.resolveRealPlayUrl(url);
+        // ---------- 新增：尝试 rrsip 转换 ----------
+        final rrsipUrl = await _resolveWithRrsip(url);
+        final effectiveUrl = rrsipUrl ?? url;
+
+        // 如果 rrsip 转换成功，直接使用；否则再经过 redirectCache
+        final realUrl = (rrsipUrl != null)
+            ? effectiveUrl
+            : await ServiceLocator.redirectCache.resolveRealPlayUrl(effectiveUrl);
 
         final redirectTime =
             DateTime.now().difference(redirectStartTime).inMilliseconds;
@@ -1347,13 +1353,20 @@ class PlayerProvider extends ChangeNotifier {
       // Android TV 使用原生播放器，通过 MethodChannel 处理
       // 其他平台（包括 Android 手机）都使用 media_kit
       if (!_useNativePlayer) {
-        // 解析真实播放地址（处理 302 重定向）
+        // ---------- 新增：尝试 rrsip 转换 ----------
+        ServiceLocator.log
+            .i('>>> 尝试 rrsip 转换', tag: 'PlayerProvider');
+        final rrsipUrl = await _resolveWithRrsip(playUrl);
+        final effectiveUrl = rrsipUrl ?? playUrl;
+
+        // 如果 rrsip 转换成功，直接使用；否则再经过 redirectCache
         ServiceLocator.log
             .i('>>> Start resolving redirect', tag: 'PlayerProvider');
         final redirectStartTime = DateTime.now();
 
-        final realUrl =
-            await ServiceLocator.redirectCache.resolveRealPlayUrl(playUrl);
+        final realUrl = (rrsipUrl != null)
+            ? effectiveUrl
+            : await ServiceLocator.redirectCache.resolveRealPlayUrl(effectiveUrl);
 
         final redirectTime =
             DateTime.now().difference(redirectStartTime).inMilliseconds;
@@ -1477,13 +1490,20 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // 解析真实播放地址（处理 302 重定向）
+      // ---------- 新增：尝试 rrsip 转换 ----------
+      ServiceLocator.log
+          .i('>>> 尝试 rrsip 转换', tag: 'PlayerProvider');
+      final rrsipUrl = await _resolveWithRrsip(url);
+      final effectiveUrl = rrsipUrl ?? url;
+
+      // 如果 rrsip 转换成功，直接使用；否则再经过 redirectCache
       ServiceLocator.log
           .i('>>> Start resolving redirect', tag: 'PlayerProvider');
       final redirectStartTime = DateTime.now();
 
-      final realUrl =
-          await ServiceLocator.redirectCache.resolveRealPlayUrl(url);
+      final realUrl = (rrsipUrl != null)
+          ? effectiveUrl
+          : await ServiceLocator.redirectCache.resolveRealPlayUrl(effectiveUrl);
 
       final redirectTime =
           DateTime.now().difference(redirectStartTime).inMilliseconds;
@@ -1699,8 +1719,7 @@ class PlayerProvider extends ChangeNotifier {
     _isAutoDetecting = false;
     _retryTimer?.cancel();
 
-    final newIndex = (_currentChannel!.currentSourceIndex -
-            1 +
+    final newIndex = (_currentChannel!.currentSourceIndex - 1 +
             _currentChannel!.sourceCount) %
         _currentChannel!.sourceCount;
     _currentChannel!.currentSourceIndex = newIndex;
@@ -1767,13 +1786,20 @@ class PlayerProvider extends ChangeNotifier {
 
     try {
       if (!_useNativePlayer) {
-        // 解析真实播放地址（处理 302 重定向）
+        // ---------- 新增：尝试 rrsip 转换 ----------
+        ServiceLocator.log
+            .i('>>> 切换源: 尝试 rrsip 转换', tag: 'PlayerProvider');
+        final rrsipUrl = await _resolveWithRrsip(url);
+        final effectiveUrl = rrsipUrl ?? url;
+
+        // 如果 rrsip 转换成功，直接使用；否则再经过 redirectCache
         ServiceLocator.log.i('>>> Source switch: start resolving redirect',
             tag: 'PlayerProvider');
         final redirectStartTime = DateTime.now();
 
-        final realUrl =
-            await ServiceLocator.redirectCache.resolveRealPlayUrl(url);
+        final realUrl = (rrsipUrl != null)
+            ? effectiveUrl
+            : await ServiceLocator.redirectCache.resolveRealPlayUrl(effectiveUrl);
 
         final redirectTime =
             DateTime.now().difference(redirectStartTime).inMilliseconds;
@@ -1819,6 +1845,91 @@ class PlayerProvider extends ChangeNotifier {
   void setCurrentChannelOnly(Channel channel) {
     _currentChannel = channel;
     notifyListeners();
+  }
+
+  // ============ DNS 解析与 rrsip 转换 ============
+  final Map<String, String> _dnsCache = {};
+  final Map<String, DateTime> _cacheTime = {};
+  final Duration _cacheDuration = const Duration(minutes: 5);
+
+  /// 将 URL 转换为 IP 直连 + rrsip 形式，如果转换失败则返回 null
+  Future<String?> _resolveWithRrsip(String url) async {
+    final uri = Uri.parse(url);
+
+    // 如果已经是 IP 直连且带有 rrsip，直接返回原 URL（无需转换）
+    if (_isIP(uri.host) && uri.queryParameters.containsKey('rrsip')) {
+      return url;
+    }
+
+    final host = uri.host;
+
+    // 如果主机名已经是 IP，但缺少 rrsip，可根据需要添加，但此处不添加（仅当服务商要求）
+    if (_isIP(host)) {
+      // 不添加 rrsip，返回 null 表示不转换
+      return null;
+    }
+
+    // 解析域名获取 IP
+    final ip = await _resolveDomain(host);
+    if (ip == null) {
+      // 解析失败，返回 null
+      return null;
+    }
+
+    // 重构 URL：主机替换为 IP，添加 rrsip=原始域名
+    final newUri = uri.replace(
+      host: ip,
+      queryParameters: {
+        ...uri.queryParameters,
+        'rrsip': host,
+      },
+    );
+    return newUri.toString();
+  }
+
+  /// 解析域名，返回首选 IP（IPv4 公网优先）
+  Future<String?> _resolveDomain(String host) async {
+    // 检查缓存
+    if (_dnsCache.containsKey(host) &&
+        _cacheTime.containsKey(host) &&
+        DateTime.now().difference(_cacheTime[host]!) < _cacheDuration) {
+      return _dnsCache[host];
+    }
+
+    try {
+      final addresses = await InternetAddress.lookup(host);
+      String? bestIp;
+      for (final addr in addresses) {
+        if (addr.type == InternetAddressType.IPv4 && !_isPrivateIP(addr.address)) {
+          bestIp = addr.address;
+          break;
+        }
+      }
+      bestIp ??= addresses.first.address;
+
+      // 缓存
+      _dnsCache[host] = bestIp;
+      _cacheTime[host] = DateTime.now();
+      return bestIp;
+    } catch (e) {
+      ServiceLocator.log.w('DNS解析失败: $e');
+      return null;
+    }
+  }
+
+  bool _isIP(String host) {
+    return RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(host) ||
+           RegExp(r'^[0-9a-fA-F:]+$').hasMatch(host);
+  }
+
+  bool _isPrivateIP(String ip) {
+    if (ip.startsWith('10.')) return true;
+    if (ip.startsWith('192.168.')) return true;
+    if (ip.startsWith('172.') && ip.split('.').length > 1) {
+      final second = int.tryParse(ip.split('.')[1]) ?? 0;
+      if (second >= 16 && second <= 31) return true;
+    }
+    return false;
   }
 
   @override
