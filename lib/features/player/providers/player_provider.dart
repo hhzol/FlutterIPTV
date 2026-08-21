@@ -1068,9 +1068,30 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   // ============ Public API ============
-
   Future<void> playChannel(Channel channel,
       {bool preserveCurrentSource = false}) async {
+    // 彻底停止当前播放，重置状态
+    if (_mediaKitPlayer != null && !_useNativePlayer) {
+      ServiceLocator.log.d('playChannel: 停止当前播放');
+      await _mediaKitPlayer?.stop();
+      await _clearStartEndProperties();
+      // 重置回放相关
+      _originalChannel = null;
+      _currentCatchupProgram = null;
+      _overrideDuration = null;
+    }
+  
+    // 重置所有状态
+    _state = PlayerState.idle;
+    _error = null;
+    _lastErrorMessage = null;
+    _errorDisplayed = false;
+    _retryCount = 0;
+    _retryTimer?.cancel();
+    _isAutoDetecting = false;
+    _noVideoFallbackAttempted = false;
+    _resetDeinterlaceDetection();
+    
     ServiceLocator.log
         .i('========== 开始播放频道==========', tag: 'PlayerProvider');
     ServiceLocator.log
