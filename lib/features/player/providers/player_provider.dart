@@ -11,7 +11,7 @@ import '../../../core/platform/platform_detector.dart';
 import '../../../core/services/service_locator.dart';
 import '../../../core/services/channel_test_service.dart';
 import '../../../core/services/log_service.dart';
-import '../../../core/services/epg_service.dart';
+import '../../../core/services/epg_service.dart'; // 新增：导入 EpgProgram
 import '../../settings/providers/settings_provider.dart';
 
 enum PlayerState {
@@ -23,18 +23,24 @@ enum PlayerState {
   buffering,
 }
 
+/// 回放 URL 生成结果，包含干净的播放 URL 和起止时间字符串
 class CatchupUrlResult {
-  final String url;
-  final String? startTime;
-  final String? endTime;
+  final String url; // 不含 playseek 参数的播放 URL
+  final String? startTime; // 开始时间字符串（如 "20260821092230"）
+  final String? endTime; // 结束时间字符串（如 "20260821101100"）
 
   CatchupUrlResult({required this.url, this.startTime, this.endTime});
 }
 
+/// Unified player provider that uses:
+/// - Native Android Activity (via MethodChannel) on Android TV for best 4K performance
+/// - media_kit on all other platforms (Windows, Android phone/tablet, etc.)
 class PlayerProvider extends ChangeNotifier {
+  // media_kit player (for all platforms except Android TV)
   Player? _mediaKitPlayer;
   VideoController? _videoController;
 
+  // Common state
   Channel? _currentChannel;
   PlayerState _state = PlayerState.idle;
   String? _error;
@@ -48,10 +54,10 @@ class PlayerProvider extends ChangeNotifier {
   int _volumeBoostDb = 0;
 
   int _retryCount = 0;
-  static const int _maxRetries = 2;
+  static const int _maxRetries = 2; // 改为重试2次
   Timer? _retryTimer;
-  bool _isAutoSwitching = false;
-  bool _isAutoDetecting = false;
+  bool _isAutoSwitching = false; // 标记是否正在自动切换源
+  bool _isAutoDetecting = false; // 标记是否正在自动检测源
   bool _isSoftwareDecoding = false;
   bool _noVideoFallbackAttempted = false;
   bool _allowSoftwareFallback = true;
@@ -60,22 +66,28 @@ class PlayerProvider extends ChangeNotifier {
   StreamSubscription<VideoParams>? _videoParamsSubscription;
   bool _deinterlaceConfiguredForCurrentStream = false;
   bool _initialHwdecSet = false;
-  int _deinterlaceGeneration = 0;
+  int _deinterlaceGeneration = 0; // 代际计数器，用于检测过时的 videoParams 回调
   String _videoOutput = 'auto';
   String _vo = 'unknown';
   String _configuredVo = 'auto';
 
+  // Override duration for catchup playback
   Duration? _overrideDuration;
 
+  // On Android TV, we use native player via Activity, so don't init any Flutter player
+  // On Android phone/tablet and other platforms, use media_kit
   bool get _useNativePlayer => Platform.isAndroid && PlatformDetector.isTV;
 
+  // Getters
   Player? get player => _mediaKitPlayer;
   VideoController? get videoController => _videoController;
+
   Channel? get currentChannel => _currentChannel;
   PlayerState get state => _state;
   String? get error => _error;
   Duration get position => _position;
   Duration get duration {
+    // Return override duration if set and player reports zero/small duration
     if (_overrideDuration != null && _duration.inSeconds < 10) {
       return _overrideDuration!;
     }
@@ -87,72 +99,108 @@ class PlayerProvider extends ChangeNotifier {
   double get playbackSpeed => _playbackSpeed;
   bool get isFullscreen => _isFullscreen;
   bool get controlsVisible => _controlsVisible;
+
   bool get isPlaying => _state == PlayerState.playing;
-  bool get isLoading => _state == PlayerState.loading || _state == PlayerState.buffering;
+  bool get isLoading =>
+      _state == PlayerState.loading || _state == PlayerState.buffering;
   bool get hasError => _state == PlayerState.error && _error != null;
 
+  /// Create Media object with custom User-Agent header
   Media _createMedia(String url) {
     final userAgent = ServiceLocator.settings?.userAgent ?? SettingsProvider.defaultUserAgent;
     ServiceLocator.log.d('PlayerProvider: 创建Media对象 User-Agent: $userAgent');
     return Media(url, httpHeaders: {'User-Agent': userAgent});
   }
 
+  /// Check if current content is seekable (VOD or replay)
   bool get isSeekable {
+    // 1. 检查直播类型（如果明确是直播，不可拖动）
     if (_currentChannel?.isLive == true) return false;
+
+    // 2. 检查直播类型（如果是点播或回放，可拖动）
     if (_currentChannel?.isSeekable == true) {
-      if (_currentChannel?.type == ChannelType.replay) return true;
-      if (_duration.inSeconds > 0 && _duration.inSeconds <= 86400) return true;
+      // 回放内容（Replay）应该总是 seekable，即使 duration 暂时无效（可能是流加载延迟）
+      // 我们信任 ChannelType.replay
+      if (_currentChannel?.type == ChannelType.replay) {
+        return true;
+      }
+
+      // 但还需要检查 duration 是否有效
+      if (_duration.inSeconds > 0 && _duration.inSeconds <= 86400) {
+        return true;
+      }
     }
+
+    // 3. 检查 duration（点播内容有明确时长）
+    // 直播流通常 duration 为 0 或超大值
     if (_duration.inSeconds > 0 && _duration.inSeconds <= 86400) {
-      if (_currentChannel?.isLive != true) return true;
+      // 有效时长（1秒到24小时），但要排除直播流
+      if (_currentChannel?.isLive != true) {
+        return true;
+      }
     }
+
+    // 4. 默认不可拖动（安全起见）
     return false;
   }
 
+  /// Check if should show progress bar based on settings and content
   bool shouldShowProgressBar(String progressBarMode) {
     if (progressBarMode == 'never') return false;
+    // Always show if we have an override duration (catchup)
     if (_overrideDuration != null) return true;
     if (progressBarMode == 'always') return _duration.inSeconds > 0;
+    // auto mode: only show for seekable content
     return isSeekable && _duration.inSeconds > 0;
   }
 
+  /// Set override duration for catchup playback
   void setOverrideDuration(Duration? duration) {
     _overrideDuration = duration;
     notifyListeners();
   }
 
+  /// Check if current content is live stream
   bool get isLiveStream => !isSeekable;
 
+  // 清除错误状态（用于显示错误后防止重复显示）
   void clearError() {
     _error = null;
-    _errorDisplayed = true;
+    _errorDisplayed = true; // 标记错误已被显示，防止重复触发
+    // 重置状态为 idle，避免 hasError 一直为 true
     if (_state == PlayerState.error) {
       _state = PlayerState.idle;
     }
     notifyListeners();
   }
 
+  // 错误防抖：记录上次错误时间，避免短时间内重复触发
   DateTime? _lastErrorTime;
   String? _lastErrorMessage;
-  bool _errorDisplayed = false;
+  bool _errorDisplayed = false; // 标记错误是否已被显示
 
   void _setError(String error) {
     ServiceLocator.log.d(
         'PlayerProvider: _setError 被调用 - 当前重试次数: $_retryCount/$_maxRetries, 错误: $error');
 
+    // 忽略 seek 相关的错误（直播流不支持 seek）
     if (error.contains('seekable') ||
         error.contains('Cannot seek') ||
         error.contains('seek in this stream')) {
       ServiceLocator.log.d('PlayerProvider: 忽略 seek 错误（直播流不支持拖动）');
       return;
     }
+
+    // 忽略音频解码警告（如果还能播放声音，这只是警告）
     if (error.contains('Error decoding audio') ||
         error.contains('audio decoder') ||
         error.contains('Audio decoding')) {
-      ServiceLocator.log.d('PlayerProvider: Ignore audio decode warning');
+      ServiceLocator.log.d(
+          'PlayerProvider: Ignore audio decode warning (likely partial frame decode failure)');
       return;
     }
 
+    // 尝试自动重试（重试阶段不受防护限制）
     if (_retryCount < _maxRetries && _currentChannel != null) {
       _retryCount++;
       ServiceLocator.log
@@ -166,16 +214,26 @@ class PlayerProvider extends ChangeNotifier {
       return;
     }
 
+    // 超过重试次数，检查是否有下一个源
     if (_currentChannel != null && _currentChannel!.hasMultipleSources) {
       final currentSourceIndex = _currentChannel!.currentSourceIndex;
       final totalSources = _currentChannel!.sourceCount;
+
       ServiceLocator.log
           .d('PlayerProvider: 当前源索引: $currentSourceIndex, 总源数: $totalSources');
+
+      // 计算下一个源索引（不使用取模运算，避免循环）
       int nextIndex = currentSourceIndex + 1;
+
+      // 检查下一个源是否存在
       if (nextIndex < totalSources) {
+        // 下一个源存在，先检测再尝试
         ServiceLocator.log.d(
             'PlayerProvider: 当前源(${currentSourceIndex + 1}/$totalSources) 重试失败，检测源 ${nextIndex + 1}');
+
+        // 标记开始自动检测
         _isAutoDetecting = true;
+        // 异步检测下一个源
         _checkAndSwitchToNextSource(nextIndex, error);
         return;
       } else {
@@ -184,8 +242,13 @@ class PlayerProvider extends ChangeNotifier {
       }
     }
 
+    // 没有更多源或所有源都失败，显示错误（此时才应用防抖）
     final now = DateTime.now();
-    if (_errorDisplayed) return;
+    // 如果错误已经被显示过，不再设置
+    if (_errorDisplayed) {
+      return;
+    }
+    // 相同错误在30秒内不重复设置
     if (_lastErrorMessage == error &&
         _lastErrorTime != null &&
         now.difference(_lastErrorTime!).inSeconds < 30) {
@@ -200,10 +263,12 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 检测并切换到下一个源（用于自动切换）
   Future<void> _checkAndSwitchToNextSource(
       int nextIndex, String originalError) async {
-    if (_currentChannel == null || !_isAutoDetecting) return;
+    if (_currentChannel == null || !_isAutoDetecting) return; // 如果检测被取消，停止
 
+    // 更新UI显示正在检测的源
     _currentChannel!.currentSourceIndex = nextIndex;
     _state = PlayerState.loading;
     notifyListeners();
@@ -224,16 +289,21 @@ class PlayerProvider extends ChangeNotifier {
 
     final result = await testService.testChannel(tempChannel);
 
-    if (!_isAutoDetecting) return;
+    if (!_isAutoDetecting) return; // 检测完成后再次检查是否被取消
 
     if (!result.isAvailable) {
       ServiceLocator.log.d(
           'PlayerProvider: 源 ${nextIndex + 1} 不可用: ${result.error}，继续尝试下一个源');
+
+      // 检查是否还有更多源
       final totalSources = _currentChannel!.sourceCount;
       final nextNextIndex = nextIndex + 1;
+
       if (nextNextIndex < totalSources) {
+        // 继续检测下一个源
         _checkAndSwitchToNextSource(nextNextIndex, originalError);
       } else {
+        // 已到最后一个源，显示错误
         ServiceLocator.log.d('PlayerProvider: 已到最后一个源，所有源都不可用');
         _isAutoDetecting = false;
         _state = PlayerState.error;
@@ -246,13 +316,14 @@ class PlayerProvider extends ChangeNotifier {
     ServiceLocator.log.d(
         'PlayerProvider: Source ${nextIndex + 1} is available (${result.responseTime}ms), switching');
     _isAutoDetecting = false;
-    _retryCount = 0;
-    _isAutoSwitching = true;
-    _lastErrorMessage = null;
+    _retryCount = 0; // 重置重试计数
+    _isAutoSwitching = true; // 标记为自动切换
+    _lastErrorMessage = null; // 重置错误消息，允许新源的错误被处理
     _playCurrentSource();
-    _isAutoSwitching = false;
+    _isAutoSwitching = false; // 重置标记
   }
 
+  /// 重试播放当前频道
   Future<void> _retryPlayback() async {
     if (_currentChannel == null) return;
 
@@ -264,6 +335,7 @@ class PlayerProvider extends ChangeNotifier {
     _error = null;
     notifyListeners();
 
+    // 使用 currentUrl 而不是 url，以使用当前选择的源
     final url = _currentChannel!.currentUrl;
     ServiceLocator.log.d('PlayerProvider: 重试URL: $url');
 
@@ -271,26 +343,31 @@ class PlayerProvider extends ChangeNotifier {
       if (!_useNativePlayer) {
         ServiceLocator.log
             .i('>>> Retry: start resolving redirect', tag: 'PlayerProvider');
+        // 解析真实播放地址（处理 302 重定向）
+        final redirectStartTime = DateTime.now();
 
+        // ---------- 新增：尝试 rrsip 转换 ----------
         final rrsipUrl = await _resolveWithRrsip(url);
-        final realUrl = rrsipUrl ?? url;
+        final effectiveUrl = rrsipUrl ?? url;
 
+        // 如果 rrsip 转换成功，直接使用；否则再经过 redirectCache
+        final realUrl = (rrsipUrl != null)
+            ? effectiveUrl
+            : await ServiceLocator.redirectCache.resolveRealPlayUrl(effectiveUrl);
+
+        final redirectTime =
+            DateTime.now().difference(redirectStartTime).inMilliseconds;
+        ServiceLocator.log.i('>>> 重试: 302重定向解析完成，耗时: ${redirectTime}ms',
+            tag: 'PlayerProvider');
         ServiceLocator.log.d('>>> 重试: 使用播放地址: $realUrl', tag: 'PlayerProvider');
 
-        // 清除可能的 start/end 残留
-        await _clearStartEndProperties();
-
-        // 直接 open，不重建播放器
         final playStartTime = DateTime.now();
-        // 如果尚未初始化播放器（异常情况），则初始化
-        if (_mediaKitPlayer == null) {
-          _initMediaKitPlayer();
-        }
-        // 确保去交错配置已应用（但只做必要部分）
-        await _ensureDeinterlaceAppliedIfNeeded();
+        // 代际计数器已在 _resetDeinterlaceDetection() 中递增，确保旧回调不影响新流
+        await _applyDeinterlaceFilter();
         await _mediaKitPlayer?.open(_createMedia(realUrl));
 
-        final playTime = DateTime.now().difference(playStartTime).inMilliseconds;
+        final playTime =
+            DateTime.now().difference(playStartTime).inMilliseconds;
         final totalTime = DateTime.now().difference(startTime).inMilliseconds;
         ServiceLocator.log
             .i('>>> 重试: 播放器初始化完成，耗时: ${playTime}ms', tag: 'PlayerProvider');
@@ -299,44 +376,34 @@ class PlayerProvider extends ChangeNotifier {
 
         _state = PlayerState.playing;
       }
+      // 注意：不在这里重置 _retryCount，因为播放器可能还会异步报错
+      // 重试计数会在播放真正稳定后（playing 状态持续一段时间）或切换频道时重置
       ServiceLocator.log.d('PlayerProvider: Retry command sent');
     } catch (e) {
       final totalTime = DateTime.now().difference(startTime).inMilliseconds;
       ServiceLocator.log.d('PlayerProvider: 重试失败 (${totalTime}ms): $e');
+      // 重试失败，继续尝试或显示错误
       _setError('Failed to play channel: $e');
     }
     notifyListeners();
   }
 
-  // ---------- 辅助方法：清除 start/end 属性 ----------
-  Future<void> _clearStartEndProperties() async {
-    if (_mediaKitPlayer == null || _useNativePlayer) return;
-    try {
-      final nativePlayer = _mediaKitPlayer!.platform as dynamic;
-      await nativePlayer.setProperty('start', 'none');
-      await nativePlayer.setProperty('end', 'none');
-      ServiceLocator.log.d('已重置 start/end 属性为 none');
-    } catch (e) {
-      // 忽略错误
-    }
-  }
-
-  // ---------- 应用去交错配置（仅当需要时） ----------
-  Future<void> _ensureDeinterlaceAppliedIfNeeded() async {
-    if (_deinterlaceConfiguredForCurrentStream) {
-      return; // 已配置，跳过
-    }
-    await _applyDeinterlaceFilter();
-  }
-
   String _hwdecMode = 'unknown';
   String _videoCodec = '';
   double _fps = 0;
+
+  // 保存初始化时的 hwdec 配置
   String _configuredHwdec = 'unknown';
+
+  // FPS 显示
   double _currentFps = 0;
+
+  // 视频信息
   int _videoWidth = 0;
   int _videoHeight = 0;
-  double _downloadSpeed = 0;
+  double _downloadSpeed = 0; // bytes per second
+
+  // 音频信息
   String _audioCodec = '';
   int _audioChannels = 0;
 
@@ -353,6 +420,7 @@ class PlayerProvider extends ChangeNotifier {
     final parts = <String>['${w}x$h'];
     if (_videoCodec.isNotEmpty) parts.add(_videoCodec);
     if (_fps > 0) parts.add('${_fps.toStringAsFixed(1)} fps');
+    // 音频格式
     if (_audioCodec.isNotEmpty) {
       final audioPart = StringBuffer(_audioCodec);
       if (_audioChannels > 0) {
@@ -368,6 +436,7 @@ class PlayerProvider extends ChangeNotifier {
     if (voInfo.isNotEmpty) {
       parts.add('vo: $voInfo');
     }
+    // 码率显示（基于预估下载速度）
     if (_downloadSpeed > 0) {
       final bitrateMbps = _downloadSpeed * 8 / 1000000;
       if (bitrateMbps >= 100) {
@@ -389,35 +458,37 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   void _initPlayer({bool useSoftwareDecoding = false}) {
+    // On Android TV, we use native player - don't initialize any Flutter player
     if (_useNativePlayer) {
       return;
     }
-    // 只在第一次创建播放器，后续复用
-    if (_mediaKitPlayer == null) {
-      _initMediaKitPlayer(useSoftwareDecoding: useSoftwareDecoding);
-    }
+
+    // 其他平台（包括 Android 手机）都使用 media_kit
+    _initMediaKitPlayer(useSoftwareDecoding: useSoftwareDecoding);
   }
 
+  /// 预热播放器 - 在应用启动时调用,提前初始化播放器资源
+  /// 这样首次进入播放页面时就不会卡顿
   Future<void> warmup() async {
-    if (_useNativePlayer) return;
+    if (_useNativePlayer) {
+      return; // 原生播放器不需要预热
+    }
+
     if (_mediaKitPlayer == null) {
       ServiceLocator.log
           .d('PlayerProvider: 预热播放器 - 初始化 media_kit', tag: 'PlayerProvider');
       _initMediaKitPlayer();
     }
+
+    // 使用空 Media 预热会触发错误回调，可能导致首次播放黑屏/蓝屏
+    // 目前只做实例初始化，不做无效流程预加载
   }
 
   Future<void> _initMediaKitPlayer(
       {bool useSoftwareDecoding = false, String bufferStrength = 'fast'}) async {
-    // 如果已经存在且未销毁，不要重复创建
-    if (_mediaKitPlayer != null && !_isDisposed) {
-      ServiceLocator.log.d('播放器已存在，跳过初始化');
-      return;
-    }
-
-    // 如果之前创建过但被销毁，创建新的
     _mediaKitPlayer?.dispose();
     _debugInfoTimer?.cancel();
+    // Load decoding settings (overridden by explicit useSoftwareDecoding)
     final prefs = ServiceLocator.prefs;
     final decodingMode = prefs.getString('decoding_mode') ?? 'auto';
     _windowsHwdecMode = prefs.getString('windows_hwdec_mode') ?? 'auto-safe';
@@ -432,10 +503,11 @@ class PlayerProvider extends ChangeNotifier {
     ServiceLocator.log.i('软解码模式: $useSoftwareDecoding', tag: 'PlayerProvider');
     ServiceLocator.log.i('缓冲强度: $bufferStrength', tag: 'PlayerProvider');
 
+    // 根据缓冲强度设置缓冲区大小
     final bufferSize = switch (bufferStrength) {
-      'fast' => 32 * 1024 * 1024,
-      'balanced' => 64 * 1024 * 1024,
-      'stable' => 128 * 1024 * 1024,
+      'fast' => 32 * 1024 * 1024, // 32MB - 快速启动
+      'balanced' => 64 * 1024 * 1024, // 64MB - 平衡模式
+      'stable' => 128 * 1024 * 1024, // 128MB - 稳定优先
       _ => 32 * 1024 * 1024,
     };
 
@@ -458,18 +530,22 @@ class PlayerProvider extends ChangeNotifier {
       configuration: PlayerConfiguration(
         bufferSize: bufferSize,
         vo: vo,
+        // 设置网络超时（可选）
+        // timeout: 3 秒连接最长超时
+        // 根据日志级别启用 mpv 日志
         logLevel: ServiceLocator.log.currentLevel == LogLevel.debug
             ? MPVLogLevel.debug
             : (ServiceLocator.log.currentLevel == LogLevel.off
                 ? MPVLogLevel.error
                 : MPVLogLevel.info),
         protocolWhitelist: [
-          'file', 'http', 'https', 'tcp', 'tls',
+          'file', 'http', 'https', 'tcp', 'tls', 
           'crypto', 'hls', 'applehttp', 'udp', 'rtp'
         ],
       ),
     );
 
+    // 确定硬件解码模式
     String? hwdecMode;
     if (Platform.isAndroid) {
       hwdecMode = effectiveSoftware ? 'no' : 'mediacodec';
@@ -505,6 +581,7 @@ class PlayerProvider extends ChangeNotifier {
       enableHardwareAcceleration: !effectiveSoftware,
     );
 
+    // 默认显示为配置值，后续可被实际运行时覆盖
     _hwdecMode = effectiveSoftware ? 'no' : _configuredHwdec;
     _vo = vo ?? 'auto';
 
@@ -512,15 +589,18 @@ class PlayerProvider extends ChangeNotifier {
     _setupMediaKitListeners();
     _updateDebugInfo();
 
-    // 初始化时设置一次 hwdec，并重置去交错状态
+    // VideoController 创建后会强制设 hwdec=auto，在此覆盖去交错参数
+    // 必须在 open() 之前调用，否则 hwdec=auto 会绕过 vf 滤镜链
+    // 重置 _initialHwdecSet 确保新播放器的 hwdec 被正确设置
     _initialHwdecSet = false;
     _resetDeinterlaceDetection();
-    // 应用必要的去交错设置（但不一定会立即生效，因为 videoParams 尚未触发）
     await _applyDeinterlaceFilter();
 
     ServiceLocator.log.i('播放器初始化完成', tag: 'PlayerProvider');
   }
 
+  /// 安全调用 setProperty，单个失败不影响其他调用
+  /// 返回 true 表示成功，false 表示失败
   Future<bool> _safeSetProperty(String property, String value, String label) async {
     try {
       final nativePlayer = player?.platform as dynamic;
@@ -532,6 +612,7 @@ class PlayerProvider extends ChangeNotifier {
     }
   }
 
+  /// 安全读取 getProperty，失败返回 null
   Future<String?> _safeGetProperty(String property, String label) async {
     try {
       final nativePlayer = player?.platform as dynamic;
@@ -542,6 +623,7 @@ class PlayerProvider extends ChangeNotifier {
     }
   }
 
+  /// 返回用户配置的 hwdec 模式，考虑软解码设置
   String _getConfiguredHwdecMode() {
     if (_isSoftwareDecoding) return 'no';
     switch (_windowsHwdecMode) {
@@ -557,33 +639,64 @@ class PlayerProvider extends ChangeNotifier {
     }
   }
 
+  /// 重置去交错检测状态，取消 videoParams 监听订阅
+  /// 在每次播放新流之前调用，确保旧流监听不会影响新流。
+  /// 递增代际计数器使正在执行的旧异步回调在设置 guard 前检测到代际变化并忽略。
+  ///
+  /// 注意：不重置 _initialHwdecSet，避免每次换台同步阶段重新设置 hwdec
+  /// 触发 mpv 视频链初始化导致的 1-2s 延迟。hwdec 仅在首次创建播放器时设置，
+  /// 异步阶段根据源类型（1080i/逐行）做增量调整。
   void _resetDeinterlaceDetection() {
-    _deinterlaceGeneration++;
+    _deinterlaceGeneration++; // 递增代际，使正在执行的旧回调失效
     _videoParamsSubscription?.cancel();
     _videoParamsSubscription = null;
     _deinterlaceConfiguredForCurrentStream = false;
   }
 
+  /// 应用去交错（反隔行）配置
+  ///
+  /// 时序分两阶段：
+  ///   1. 同步阶段（open() 之前调用）：
+  ///      - 设置公共参数 video-sync / framedrop
+  ///      - 设置 deinterlace=no, vf=``（清除旧滤镜残留）
+  ///      - 仅在首次创建播放器时设置 hwdec（通过 _initialHwdecSet 控制）
+  ///   2. 异步阶段（videoParams 流回调，open() 之后）：
+  ///      - 补读 interlaced / gamma / primaries 等属性
+  ///      - 根据源类型做增量调整：
+  ///        - 1080i: 切换 hwdec=d3d11va-copy + 尝试软件 vf 滤镜
+  ///        - 逐行源: 重置 hwdec 为用户配置模式，清除上一流可能残留的 d3d11va-copy
+  ///      - 部分场景（软件滤镜失败）回退硬件去交错
+  ///
+  /// 注意：每次切换频道前必须调用 _resetDeinterlaceDetection() 递增代际计数器，
+  /// 确保旧的 videoParams 异步回调不会干扰新流的配置。
+  /// _initialHwdecSet 仅在创建新播放器时重置，不随换台重置，避免不必要的 hwdec
+  /// 设置触发 mpv 视频链初始化延迟。
   Future<void> _applyDeinterlaceFilter() async {
     if (!Platform.isWindows) return;
     final prefs = ServiceLocator.prefs;
     final enabled = prefs.getBool('deinterlace_enabled') ?? true;
 
-    // 这些是必须的，不管是否已配置
+    // 公共参数：所有源均使用 display-resample 同步
     await _safeSetProperty('video-sync', 'display-resample', 'video-sync');
     await _safeSetProperty('framedrop', 'vo', 'framedrop');
+
+    // 允许 RTSP 协议：media_kit 默认 protocol-whitelist 不含 rtsp，
+    // 会导致 avformat_open_input() 失败并报 "Protocol 'rtsp' not on whitelist"
+    // 覆盖为包含 rtsp（及底层 udp/rtp/tcp）的安全白名单
     await _safeSetProperty(
         'protocol-whitelist',
         'udp,rtp,rtsp,tcp,tls,data,file,http,https,crypto',
         'protocol-whitelist');
 
-    // 如果已经配置过且启用状态相同，跳过后续耗时设置
-    if (_deinterlaceConfiguredForCurrentStream) {
-      ServiceLocator.log.d('去交错已配置，跳过重复设置');
-      return;
-    }
-
+    // ═══════════════════════════════════════════════
+    // 同步阶段（open() 之前）：设置解码器启动参数
+    // ═══════════════════════════════════════════════
     if (enabled) {
+      // 启用去交错：使用用户配置的 hwdec 模式（如 auto-safe、auto-copy 等）
+      // - 不使用硬编码 d3d11va-copy：某些 HEVC 4K 流在 d3d11va-copy 下解码失败（PPS id out of range）
+      // - 异步 videoParams 回调确认是 1080i 后，才会切换为 d3d11va-copy 以支持软件 vf 滤镜
+      // - 对逐行 4K 源：保持用户配置的 hwdec，避免解码器不兼容
+      // hwdec 只在首次设置，避免 open() 后重复设置触发解码器重建
       if (!_initialHwdecSet) {
         await _safeSetProperty('hwdec', _getConfiguredHwdecMode(), 'hwdec');
         _initialHwdecSet = true;
@@ -591,6 +704,7 @@ class PlayerProvider extends ChangeNotifier {
       await _safeSetProperty('deinterlace', 'no', 'deinterlace');
       await _safeSetProperty('vf', '', 'clear_vf');
     } else {
+      // 禁用去交错：使用用户配置的 hwdec
       await _safeSetProperty('deinterlace', 'no', 'deinterlace');
       await _safeSetProperty('vf', '', 'clear_vf');
       if (!_initialHwdecSet) {
@@ -600,24 +714,34 @@ class PlayerProvider extends ChangeNotifier {
       _videoParamsSubscription?.cancel();
       _videoParamsSubscription = null;
       ServiceLocator.log.i('去交错已禁用', tag: 'PlayerProvider');
-      _deinterlaceConfiguredForCurrentStream = true; // 标记已配置
       return;
     }
 
-    // 异步阶段：注册 videoParams 回调
+    // ═══════════════════════════════════════════════
+    // 异步阶段（open() 之后）：videoParams 流回调，增量调整
+    // ═══════════════════════════════════════════════
+    // 仅当尚未设置监听器时设置（避免重复订阅）
+    // 每次播放新流前通过 _resetDeinterlaceDetection() 取消旧订阅
     if (_videoParamsSubscription == null) {
       _deinterlaceConfiguredForCurrentStream = false;
       _videoParamsSubscription = _mediaKitPlayer?.stream.videoParams.listen((params) async {
+        // 捕获当前代际，用于检测过时的回调
         final capturedGeneration = _deinterlaceGeneration;
+        // 等待有效数据（w > 0 && h > 0），且防重入
         if (_deinterlaceConfiguredForCurrentStream || params.w == null || params.w! <= 0) return;
 
+        // 补读 video-frame-info/interlaced — VideoParams 不含此字段
         final interlaced = await _safeGetProperty('video-frame-info/interlaced', 'interlaced');
+        // 补读 estimated-vf-fps 辅助判定
         final vfFpsStr = await _safeGetProperty('estimated-vf-fps', 'vf-fps');
         final vfFps = double.tryParse(vfFpsStr ?? '') ?? 0;
 
+        // 读取源端实际色彩空间，用于动态 HDR/SDR 判定
+        // 注意：色彩空间信息（gamma/primaries）可能延迟就绪，需先检查再设置 guard
         final srcGamma = await _safeGetProperty('video-params/gamma', 'gamma');
         final srcPrimaries = await _safeGetProperty('video-params/primaries', 'primaries');
 
+        // 如果 HDR 元数据尚未就绪，不设置 guard 标志，等待下次 videoParams 事件重试
         if (srcGamma == null || srcGamma.isEmpty || srcPrimaries == null || srcPrimaries.isEmpty) {
           ServiceLocator.log.d(
               '色彩空间信息尚未就绪 (gamma=$srcGamma, primaries=$srcPrimaries)，延迟到下次 videoParams 事件配置',
@@ -625,6 +749,8 @@ class PlayerProvider extends ChangeNotifier {
           return;
         }
 
+        // 检查代际：如果在此期间 _resetDeinterlaceDetection() 被调用（快速切换频道），
+        // 当前回调属于旧流，不应再设置 guard 或配置参数，让新流的回调来处理
         if (capturedGeneration != _deinterlaceGeneration) {
           ServiceLocator.log.d('videoParams 回调已过时（代际变化），忽略', tag: 'PlayerProvider');
           return;
@@ -633,25 +759,37 @@ class PlayerProvider extends ChangeNotifier {
         _deinterlaceConfiguredForCurrentStream = true;
 
         final sigPeak = await _safeGetProperty('video-params/sig-peak', 'sig-peak');
+
+        // 读取 codec 用于预设规则
         final codec = await _safeGetProperty('video-params/codec', 'codec');
 
         final h = params.h ?? 0;
         final w = params.w ?? 0;
         final isInterlaced = interlaced == '1';
 
+        // 1080i 判定：标准检测 + 帧率兜底 + 预设规则
+        // 预设规则：H.264 + 1920×1080 的直播源，中国广电通常为 1080i50
+        // 即使首帧 interlaced 字段不稳定，也能正确启用去隔行
         final is1080i = (h == 1080 && isInterlaced) ||
                         (h == 1080 && vfFps < 31 && interlaced != '0') ||
                         (codec == 'h264' && h == 1080 && w == 1920);
+        // HDR 判定：BT.2020 色域 + (PQ 或 HLG 伽马曲线)
         final isHDR = srcPrimaries == 'bt.2020' &&
                       (srcGamma == 'pq' || srcGamma == 'hlg');
 
+        // ════════════════════════════════════════════
+        // 第一步：动态色彩映射 — 先判断 HDR/SDR，再决定色彩参数
+        // ════════════════════════════════════════════
         if (isHDR) {
           if (srcGamma == 'hlg') {
+            // HLG 广播源：HLG 设计为兼容 SDR 显示器，75% 电平即 100% SDR 白
+            // 不干预色彩，让 mpv 走默认的 HLG→SDR 广播标准下变换
             await _safeSetProperty('hdr-compute-peak', 'yes', 'hdr-compute-peak');
             ServiceLocator.log.i(
                 'HDR 源(HLG): mpv 默认 HLG→SDR 转换 (gamma=$srcGamma, primaries=$srcPrimaries)',
                 tag: 'PlayerProvider');
           } else {
+            // PQ/HDR10 源：主动色调映射到 SDR
             await _safeSetProperty('target-prim', 'bt.709', 'target-prim');
             await _safeSetProperty('target-trc', 'bt.1886', 'target-trc');
             await _safeSetProperty('tone-mapping', 'bt.2390', 'tone-mapping');
@@ -663,6 +801,7 @@ class PlayerProvider extends ChangeNotifier {
                 tag: 'PlayerProvider');
           }
         } else {
+          // SDR 源（包括 4K SDR、1080p 等）：清零所有 HDR 残留参数
           await _safeSetProperty('target-prim', 'auto', 'target-prim');
           await _safeSetProperty('target-trc', 'auto', 'target-trc');
           await _safeSetProperty('hdr-compute-peak', 'no', 'hdr-compute-peak');
@@ -671,7 +810,15 @@ class PlayerProvider extends ChangeNotifier {
               tag: 'PlayerProvider');
         }
 
+        // ════════════════════════════════════════════
+        // 第二步：去交错增量配置 — 根据源类型选择性调整 hwdec
+        // ════════════════════════════════════════════
         if (is1080i && !_isSoftwareDecoding) {
+          // 分支 A: 1080i 隔行源 → 软件去交错优先
+          // 策略：先用当前 hwdec 尝试 vf 滤镜（如果上一流也是 1080i，hwdec 已是
+          // d3d11va-copy，滤镜可直接生效，无需 hwdec 切换触发解码器重建）。
+          // 仅当当前 hwdec 不支持软件 vf 时（如从 4K 切来，hwdec=auto-safe），
+          // 才切换为 d3d11va-copy 并重试。
           await _safeSetProperty('deinterlace', 'no', 'deinterlace');
 
           const filters = [
@@ -682,6 +829,7 @@ class PlayerProvider extends ChangeNotifier {
 
           String? workingFilter;
 
+          // 第一轮尝试：用当前 hwdec 试 vf 滤镜
           for (final vf in filters) {
             await _safeSetProperty('vf', '', 'clear_vf');
             final success = await _safeSetProperty('vf', vf, 'try_vf');
@@ -697,8 +845,12 @@ class PlayerProvider extends ChangeNotifier {
             }
           }
 
+          // 如果当前 hwdec 不支持软件 vf（如 auto-safe 硬解模式无法挂载 vf 滤镜链），
+          // 切换为 d3d11va-copy 后重试
           if (workingFilter == null) {
             await _safeSetProperty('hwdec', 'd3d11va-copy', 'hwdec_1080i');
+            // hwdec 切换后解码器重建，需等待重建完成再设置 vf 滤镜
+            // 采用轮询方式：反复尝试设置并验证 vf，直到成功或超时
             for (int retry = 0; retry < 5 && workingFilter == null; retry++) {
               await Future.delayed(const Duration(milliseconds: 50));
               for (final vf in filters) {
@@ -719,6 +871,7 @@ class PlayerProvider extends ChangeNotifier {
           }
 
           if (workingFilter == null) {
+            // 软件滤镜全部不可用 → 切换回用户配置的 hwdec 并启用硬件去交错
             ServiceLocator.log.i(
                 '1080i: 软件滤镜不可用，退回硬件去交错 (deinterlace=yes)',
                 tag: 'PlayerProvider');
@@ -727,6 +880,10 @@ class PlayerProvider extends ChangeNotifier {
             await _safeSetProperty('deinterlace', 'yes', 'deinterlace');
           }
         } else {
+          // 分支 B: 逐行源（1080p / 2160p SDR / 2160p HDR 等）
+          // 显式重置 hwdec 为用户配置模式，清除上一流可能设置的 d3d11va-copy
+          // 同步阶段跳过 hwdec 设置（_initialHwdecSet 已为 true），
+          // 因此由异步阶段在此处确保 hwdec 正确
           await _safeSetProperty('hwdec', _getConfiguredHwdecMode(), 'hwdec_progressive');
           await _safeSetProperty('deinterlace', 'no', 'deinterlace');
           await _safeSetProperty('vf', '', 'clear_vf');
@@ -741,9 +898,12 @@ class PlayerProvider extends ChangeNotifier {
   void _setupMediaKitListeners() {
     ServiceLocator.log.d('设置播放器监听器', tag: 'PlayerProvider');
 
+    // 始终激活 mpv 日志监听器，确保所有冗余日志被过滤
+    // 不依赖 LogLevel 开关，因为 mpv 日志过滤对于保持输出干净至关重要
     _mediaKitPlayer!.stream.log.listen((log) {
       final message = log.text.toLowerCase();
 
+      // 过滤 FFmpeg 噪音日志（SEI truncated、mmco、reference frames 等）
       if (message.contains('sei type') ||
           message.contains('truncated at') ||
           message.contains('mmco') ||
@@ -758,10 +918,16 @@ class PlayerProvider extends ChangeNotifier {
         return;
       }
 
+      // 根据当前日志级别决定是否转发
       if (ServiceLocator.log.currentLevel != LogLevel.off) {
         ServiceLocator.log.d('MPV log: ${log.text}', tag: 'PlayerProvider');
       }
 
+        // 检测并记录解码信息：统一使用 [Decoder] 前缀，精确解析实际解码器。
+      // 之前用多个互斥 if 分支按关键字模糊匹配（hwdec→"硬件解码"、d3d11→
+      // "软件解码"等），同一条 MPV 日志常命中多个分支，被重复打上互相矛盾的
+      // 标签（如 "使用硬件解码" 与 "使用软件解码" 同时出现），严重误导排查。
+      // 现在只在实际解码器/输出驱动变化时记录一条统一标签的日志。
       if (message.contains('using hardware decoding') ||
           message.contains('software decoding') ||
           message.contains('hwdec') ||
@@ -778,17 +944,20 @@ class PlayerProvider extends ChangeNotifier {
         }
       }
 
+      // 记录错误和警告
       if (log.level == 'error') {
         ServiceLocator.log.e('MPV错误: ${log.text}', tag: 'PlayerProvider');
       } else if (log.level == 'warn') {
         ServiceLocator.log.w('MPV警告: ${log.text}', tag: 'PlayerProvider');
       }
-    });
+      });
 
     _mediaKitPlayer!.stream.playing.listen((playing) {
       ServiceLocator.log.d('播放状态变化: playing=$playing', tag: 'PlayerProvider');
       if (playing) {
         _state = PlayerState.playing;
+        // 只有在播放稳定后才重置重试计数
+        // 使用延迟确保播放真正开始，而不是短暂的状态变化
         Future.delayed(const Duration(seconds: 3), () {
           if (_state == PlayerState.playing && _currentChannel != null) {
             ServiceLocator.log
@@ -866,6 +1035,7 @@ class PlayerProvider extends ChangeNotifier {
       if (err.isNotEmpty) {
         ServiceLocator.log.e('播放器错误: $err', tag: 'PlayerProvider');
 
+        // 分析错误类型
         if (err.toLowerCase().contains('decode') ||
             err.toLowerCase().contains('decoder')) {
           ServiceLocator.log.e('>>> 解码错误: $err', tag: 'PlayerProvider');
@@ -911,11 +1081,14 @@ class PlayerProvider extends ChangeNotifier {
     _debugInfoTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (_mediaKitPlayer == null) return;
 
+      // 如果线程未开启或尚未解析到实际值，使用配置值兜底
       if (ServiceLocator.log.currentLevel == LogLevel.off &&
           (_hwdecMode == 'unknown' || _hwdecMode.isEmpty)) {
         _hwdecMode = _configuredHwdec;
       }
 
+      // 实时读取 hwdec-current 属性，显示实际使用的硬件解码模式
+      // 避免仅显示配置值（如 auto-safe），而实际可能已切换为 d3d11va-copy
       _safeGetProperty('hwdec-current', 'hwdec-current').then((current) {
         if (current != null && current.isNotEmpty && current != _hwdecMode) {
           _hwdecMode = current;
@@ -923,6 +1096,7 @@ class PlayerProvider extends ChangeNotifier {
         }
       });
 
+      // 实时读取音频信息
       _safeGetProperty('audio-params/codec', 'audio-codec').then((codec) {
         if (codec != null && codec.isNotEmpty && codec != _audioCodec) {
           _audioCodec = codec;
@@ -937,9 +1111,11 @@ class PlayerProvider extends ChangeNotifier {
         }
       });
 
+      // 更新视频宽高
       final newWidth = _mediaKitPlayer!.state.width ?? 0;
       final newHeight = _mediaKitPlayer!.state.height ?? 0;
 
+      // 检测视频尺寸变化（可能表示解码成功）
       if (newWidth != _videoWidth || newHeight != _videoHeight) {
         if (newWidth > 0 && newHeight > 0) {
           ServiceLocator.log.i('视频解码成功: ${newWidth}x$newHeight',
@@ -952,19 +1128,23 @@ class PlayerProvider extends ChangeNotifier {
       _videoWidth = newWidth;
       _videoHeight = newHeight;
 
+      // Windows 端直接使用 track 中的 fps 信息
+      // media_kit (mpv) 的显示帧率等于视频源帧率
       if (_state == PlayerState.playing && _fps > 0) {
         _currentFps = _fps;
       } else {
         _currentFps = 0;
       }
 
+      // 实时码率 - 读取 mpv 的 video-bitrate 和 audio-bitrate 属性
+      // 单位为 bps（bits per second），转成 bytes per second 存入 _downloadSpeed
       if (_state == PlayerState.playing) {
         _safeGetProperty('video-bitrate', 'video-bitrate').then((v) {
           _safeGetProperty('audio-bitrate', 'audio-bitrate').then((a) {
             final vBps = double.tryParse(v ?? '');
             final aBps = double.tryParse(a ?? '');
             if (vBps != null && vBps > 0) {
-              _downloadSpeed = (vBps + (aBps ?? 0)) / 8;
+              _downloadSpeed = (vBps + (aBps ?? 0)) / 8; // bps -> bytes/s
             } else {
               _fallbackBitrateEstimate();
             }
@@ -978,6 +1158,8 @@ class PlayerProvider extends ChangeNotifier {
     });
   }
 
+  /// 备用码率估算：当 mpv 的 video-bitrate 属性不可用时，
+  /// 基于视频分辨率和帧率估算码率
   void _fallbackBitrateEstimate() {
     if (_videoWidth <= 0 || _videoHeight <= 0) {
       _downloadSpeed = 0;
@@ -987,25 +1169,29 @@ class PlayerProvider extends ChangeNotifier {
     final fps = _fps > 0 ? _fps : 25.0;
     double compressionFactor;
     if (pixels >= 3840 * 2160) {
-      compressionFactor = 0.04;
+      compressionFactor = 0.04; // 4K
     } else if (pixels >= 1920 * 1080) {
-      compressionFactor = 0.06;
+      compressionFactor = 0.06; // 1080p
     } else if (pixels >= 1280 * 720) {
-      compressionFactor = 0.08;
+      compressionFactor = 0.08; // 720p
     } else {
-      compressionFactor = 0.10;
+      compressionFactor = 0.10; // SD
     }
-    final estimatedBitrate = pixels * fps * compressionFactor;
-    _downloadSpeed = estimatedBitrate / 8.0;
+    final estimatedBitrate = pixels * fps * compressionFactor; // bps
+    _downloadSpeed = estimatedBitrate / 8.0; // bytes/s
   }
 
+  /// 从 mpv 的 audio-params/channels 布局字符串解析声道数
+  /// 例如: "stereo"→2, "5.1"→6, "7.1"→8, "mono"→1
   int _parseChannelCount(String layout) {
     if (layout.isEmpty) return 0;
+    // 尝试匹配 "N.M" 或 "N" 格式的数字
     final match = RegExp(r'(\d+)').firstMatch(layout);
     if (match != null) {
       final count = int.tryParse(match.group(1)!);
       if (count != null && count > 0) return count;
     }
+    // 处理命名格式
     switch (layout.toLowerCase()) {
       case 'mono':
         return 1;
@@ -1021,19 +1207,25 @@ class PlayerProvider extends ChangeNotifier {
 
   void _updateHwdecFromLog(String lowerMessage) {
     String? detected;
+
+    // e.g. "Using hardware decoding (d3d11va-copy)"
     final hwdecMatch = RegExp(r'using hardware decoding\s*\(([^)]+)\)')
         .firstMatch(lowerMessage);
     if (hwdecMatch != null) {
       detected = hwdecMatch.group(1);
     }
+
+    // e.g. "hwdec=auto", "hwdec: d3d11va"
     final hwdecKeyMatch = RegExp(r'hwdec(?:-current)?\s*[:=]\s*([\w\-]+)')
         .firstMatch(lowerMessage);
     if (detected == null && hwdecKeyMatch != null) {
       detected = hwdecKeyMatch.group(1);
     }
+
     if (detected == null && lowerMessage.contains('software decoding')) {
       detected = 'no';
     }
+
     if (detected != null && detected.isNotEmpty && detected != _hwdecMode) {
       _hwdecMode = detected;
       notifyListeners();
@@ -1042,16 +1234,21 @@ class PlayerProvider extends ChangeNotifier {
 
   void _updateVoFromLog(String lowerMessage) {
     String? detected;
+
+    // e.g. "VO: [gpu] 1920x1080"
     final voMatch =
         RegExp(r'vo:\s*\[?([a-z0-9_\-]+)\]?').firstMatch(lowerMessage);
     if (voMatch != null) {
       detected = voMatch.group(1);
     }
+
+    // e.g. "Using video output driver: gpu"
     final driverMatch = RegExp(r'video output driver:\s*([a-z0-9_\-]+)')
         .firstMatch(lowerMessage);
     if (detected == null && driverMatch != null) {
       detected = driverMatch.group(1);
     }
+
     if (detected != null && detected.isNotEmpty && detected != _vo) {
       _vo = detected;
       notifyListeners();
@@ -1096,9 +1293,6 @@ class PlayerProvider extends ChangeNotifier {
     if (!_allowSoftwareFallback) return;
     _retryCount++;
     final channelToPlay = _currentChannel;
-    // 重建播放器（软解码模式）
-    _mediaKitPlayer?.dispose();
-    _mediaKitPlayer = null;
     _initMediaKitPlayer(useSoftwareDecoding: true);
     if (channelToPlay != null) playChannel(channelToPlay);
   }
@@ -1107,34 +1301,6 @@ class PlayerProvider extends ChangeNotifier {
 
   Future<void> playChannel(Channel channel,
       {bool preserveCurrentSource = false}) async {
-    // ========== 优化：只在首次创建播放器 ==========
-    if (_mediaKitPlayer == null && !_useNativePlayer) {
-      ServiceLocator.log.d('playChannel: 首次播放，初始化播放器');
-      _initMediaKitPlayer();
-    }
-
-    // ========== 停止当前播放（不销毁播放器） ==========
-    if (_mediaKitPlayer != null && !_useNativePlayer) {
-      ServiceLocator.log.d('playChannel: 停止当前播放（保留播放器实例）');
-      await _mediaKitPlayer?.stop();
-      await _clearStartEndProperties();
-      // 重置去交错配置标记（因为新流可能不同）
-      _deinterlaceConfiguredForCurrentStream = false;
-      // 重置代际，使旧 videoParams 回调失效
-      _resetDeinterlaceDetection();
-    }
-
-    // ========== 重置状态 ==========
-    _state = PlayerState.idle;
-    _error = null;
-    _lastErrorMessage = null;
-    _errorDisplayed = false;
-    _retryCount = 0;
-    _retryTimer?.cancel();
-    _isAutoDetecting = false;
-    _noVideoFallbackAttempted = false;
-    _overrideDuration = null; // 清除回放时长覆盖
-
     ServiceLocator.log
         .i('========== 开始播放频道==========', tag: 'PlayerProvider');
     ServiceLocator.log
@@ -1145,18 +1311,31 @@ class PlayerProvider extends ChangeNotifier {
 
     _currentChannel = channel;
     _state = PlayerState.loading;
-    loadVolumeSettings();
+    _error = null;
+    _lastErrorMessage = null; // 重置错误防抖
+    _errorDisplayed = false; // 重置错误显示标记
+    _retryCount = 0; // 重置重试计数
+    _retryTimer?.cancel(); // 取消任何正在进行的重试
+    _isAutoDetecting = false; // 取消任何正在进行的自动检测
+    _noVideoFallbackAttempted = false;
+    _resetDeinterlaceDetection();
+    loadVolumeSettings(); // Apply volume boost settings
+    // 使用 postFrameCallback 避免在构建阶段同步 notifyListeners 导致 setState during build
     WidgetsBinding.instance.addPostFrameCallback((_) {
       notifyListeners();
     });
 
+    // 如果有多个源，先检测找到第一个可用的源
     if (channel.hasMultipleSources && !preserveCurrentSource) {
       ServiceLocator.log
           .i('频道有 ${channel.sourceCount} 个源，开始检测可用源', tag: 'PlayerProvider');
       final detectStartTime = DateTime.now();
+
       final availableSourceIndex = await _findFirstAvailableSource(channel);
+
       final detectTime =
           DateTime.now().difference(detectStartTime).inMilliseconds;
+
       if (availableSourceIndex != null) {
         channel.currentSourceIndex = availableSourceIndex;
         ServiceLocator.log.i(
@@ -1182,25 +1361,36 @@ class PlayerProvider extends ChangeNotifier {
     try {
       final playerInitStartTime = DateTime.now();
 
+      // Android TV 使用原生播放器，通过 MethodChannel 处理
+      // 其他平台（包括 Android 手机）都使用 media_kit
       if (!_useNativePlayer) {
+        // ---------- 新增：尝试 rrsip 转换 ----------
         ServiceLocator.log
             .i('>>> 尝试 rrsip 转换', tag: 'PlayerProvider');
         final rrsipUrl = await _resolveWithRrsip(playUrl);
-        final realUrl = rrsipUrl ?? playUrl;
+        final effectiveUrl = rrsipUrl ?? playUrl;
 
+        // 如果 rrsip 转换成功，直接使用；否则再经过 redirectCache
+        ServiceLocator.log
+            .i('>>> Start resolving redirect', tag: 'PlayerProvider');
+        final redirectStartTime = DateTime.now();
+
+        final realUrl = (rrsipUrl != null)
+            ? effectiveUrl
+            : await ServiceLocator.redirectCache.resolveRealPlayUrl(effectiveUrl);
+
+        final redirectTime =
+            DateTime.now().difference(redirectStartTime).inMilliseconds;
+        ServiceLocator.log
+            .i('>>> 302重定向解析完成，耗时: ${redirectTime}ms', tag: 'PlayerProvider');
         ServiceLocator.log.d('>>> 使用播放地址: $realUrl', tag: 'PlayerProvider');
 
-        // 清除 start/end 残留
-        await _clearStartEndProperties();
-
+        // 开始播放
         ServiceLocator.log
             .i('>>> Start initializing player', tag: 'PlayerProvider');
         final playStartTime = DateTime.now();
-
-        // ========== 优化：去交错滤镜只在需要时重新应用 ==========
-        await _ensureDeinterlaceAppliedIfNeeded();
-
-        // ========== 核心优化：直接打开新流，不重建播放器 ==========
+        // 代际计数器已在 _resetDeinterlaceDetection() 中递增，确保旧回调不影响新流
+        await _applyDeinterlaceFilter();
         await _mediaKitPlayer?.open(_createMedia(realUrl));
 
         final playTime =
@@ -1212,6 +1402,7 @@ class PlayerProvider extends ChangeNotifier {
         _scheduleNoVideoFallbackIfNeeded();
       }
 
+      // 记录观看历史
       final channelId = channel.id;
       final playlistId = channel.playlistId;
       if (channelId != null) {
@@ -1239,31 +1430,31 @@ class PlayerProvider extends ChangeNotifier {
     final channelToPlay = _currentChannel;
     _state = PlayerState.loading;
     notifyListeners();
-    // 重新初始化播放器（重建）
-    _mediaKitPlayer?.dispose();
-    _mediaKitPlayer = null;
     _initMediaKitPlayer(bufferStrength: bufferStrength);
     if (channelToPlay != null) {
       await playChannel(channelToPlay);
     }
   }
 
+  /// 查找第一个可用的源
   Future<int?> _findFirstAvailableSource(Channel channel) async {
     ServiceLocator.log
         .d('开始检测第${channel.sourceCount} 个源', tag: 'PlayerProvider');
     final testService = ChannelTestService();
 
     for (int i = 0; i < channel.sourceCount; i++) {
+      // 更新UI显示当前检测的源
       channel.currentSourceIndex = i;
       notifyListeners();
 
+      // 创建临时频道对象用于测试
       final tempChannel = Channel(
         id: channel.id,
         name: channel.name,
         url: channel.sources[i],
         groupName: channel.groupName,
         logoUrl: channel.logoUrl,
-        sources: [channel.sources[i]],
+        sources: [channel.sources[i]], // 只测试当前源
         playlistId: channel.playlistId,
       );
 
@@ -1288,51 +1479,55 @@ class PlayerProvider extends ChangeNotifier {
 
     ServiceLocator.log
         .e('所有${channel.sourceCount} 个源都不可用', tag: 'PlayerProvider');
-    return null;
+    return null; // 所有源都不可用
   }
 
   Future<void> playUrl(String url, {String? name}) async {
+    // Android TV 使用原生播放器，不支持此方法
     if (_useNativePlayer) {
       ServiceLocator.log
           .w('playUrl: Android TV 使用原生播放器，不支持此方法', tag: 'PlayerProvider');
       return;
     }
 
-    // 确保播放器存在
-    if (_mediaKitPlayer == null) {
-      _initMediaKitPlayer();
-    }
-
-    // 停止当前播放
-    if (_mediaKitPlayer != null) {
-      await _mediaKitPlayer?.stop();
-      await _clearStartEndProperties();
-      _resetDeinterlaceDetection();
-    }
-
     final startTime = DateTime.now();
     _state = PlayerState.loading;
     _error = null;
-    _lastErrorMessage = null;
-    _errorDisplayed = false;
+    _lastErrorMessage = null; // 重置错误防抖
+    _errorDisplayed = false; // 重置错误显示标记
     _noVideoFallbackAttempted = false;
-    loadVolumeSettings();
+    _resetDeinterlaceDetection();
+    loadVolumeSettings(); // Apply volume boost settings
     notifyListeners();
 
     try {
+      // ---------- 新增：尝试 rrsip 转换 ----------
       ServiceLocator.log
           .i('>>> 尝试 rrsip 转换', tag: 'PlayerProvider');
       final rrsipUrl = await _resolveWithRrsip(url);
-      final realUrl = rrsipUrl ?? url;
+      final effectiveUrl = rrsipUrl ?? url;
 
+      // 如果 rrsip 转换成功，直接使用；否则再经过 redirectCache
+      ServiceLocator.log
+          .i('>>> Start resolving redirect', tag: 'PlayerProvider');
+      final redirectStartTime = DateTime.now();
+
+      final realUrl = (rrsipUrl != null)
+          ? effectiveUrl
+          : await ServiceLocator.redirectCache.resolveRealPlayUrl(effectiveUrl);
+
+      final redirectTime =
+          DateTime.now().difference(redirectStartTime).inMilliseconds;
+      ServiceLocator.log
+          .i('>>> 302重定向解析完成，耗时: ${redirectTime}ms', tag: 'PlayerProvider');
       ServiceLocator.log.d('>>> 使用播放地址: $realUrl', tag: 'PlayerProvider');
 
-      await _clearStartEndProperties();
-
+      // 开始播放
       ServiceLocator.log
           .i('>>> Start initializing player', tag: 'PlayerProvider');
       final playStartTime = DateTime.now();
-      await _ensureDeinterlaceAppliedIfNeeded();
+      // 代际计数器已在 _resetDeinterlaceDetection() 中递增，确保旧回调不影响新流
+      await _applyDeinterlaceFilter();
       await _mediaKitPlayer?.open(_createMedia(realUrl));
 
       final playTime = DateTime.now().difference(playStartTime).inMilliseconds;
@@ -1355,39 +1550,43 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   void togglePlayPause() {
-    if (_useNativePlayer) return;
+    if (_useNativePlayer) return; // TV 端由原生播放器处理
     _mediaKitPlayer?.playOrPause();
   }
 
   void pause() {
-    if (_useNativePlayer) return;
+    if (_useNativePlayer) return; // TV 端由原生播放器处理
     _mediaKitPlayer?.pause();
   }
 
   void play() {
-    if (_useNativePlayer) return;
+    if (_useNativePlayer) return; // TV 端由原生播放器处理
     _mediaKitPlayer?.play();
   }
 
   Future<void> stop({bool silent = false}) async {
-    if (_mediaKitPlayer != null && !_useNativePlayer) {
-      await _mediaKitPlayer?.stop();
-      await _clearStartEndProperties();
-    }
     _state = PlayerState.idle;
     _error = null;
-    _overrideDuration = null;
+    _overrideDuration = null; // Clear override duration
     _retryCount = 0;
     _retryTimer?.cancel();
+
+    // 取消可能正在进行的检测
     _isAutoDetecting = false;
+
+    if (_mediaKitPlayer != null) {
+      _mediaKitPlayer?.stop();
+    }
+    _state = PlayerState.idle;
     _currentChannel = null;
+
     if (!silent) {
       notifyListeners();
     }
   }
 
   void seek(Duration position) {
-    if (_useNativePlayer) return;
+    if (_useNativePlayer) return; // TV 端由原生播放器处理
     _mediaKitPlayer?.seek(position);
   }
 
@@ -1407,48 +1606,57 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  double _volumeBeforeMute = 1.0;
+  double _volumeBeforeMute = 1.0; // 保存静音前的音量
 
   void toggleMute() {
     if (!_isMuted) {
+      // 静音前保存当前音量
       _volumeBeforeMute = _volume > 0 ? _volume : 1.0;
     }
     _isMuted = !_isMuted;
     if (!_isMuted && _volume == 0) {
+      // 取消静音时如果音量为0，恢复到之前的音量
       _volume = _volumeBeforeMute;
     }
     _applyVolume();
     notifyListeners();
   }
 
+  /// Apply volume boost from settings (in dB)
   void setVolumeBoost(int db) {
     _volumeBoostDb = db.clamp(-20, 20);
     _applyVolume();
     notifyListeners();
   }
 
+  /// Load volume settings from preferences
   void loadVolumeSettings() {
     final prefs = ServiceLocator.prefs;
+    // 音量增强独立于音量标准化，最终加载
     _volumeBoostDb = prefs.getInt('volume_boost') ?? 0;
     _applyVolume();
   }
 
+  /// Calculate and apply the effective volume with boost
   void _applyVolume() {
-    if (_useNativePlayer) return;
+    if (_useNativePlayer) return; // TV 端由原生播放器处理
 
     if (_isMuted) {
       _mediaKitPlayer?.setVolume(0);
       return;
     }
 
+    // Convert dB to linear multiplier: multiplier = 10^(dB/20)
     final multiplier = math.pow(10, _volumeBoostDb / 20.0);
     final effectiveVolume =
-        (_volume * multiplier).clamp(0.0, 2.0);
+        (_volume * multiplier).clamp(0.0, 2.0); // Allow up to 2x volume
+
+    // media_kit uses 0-100 scale, but can go higher for boost
     _mediaKitPlayer?.setVolume(effectiveVolume * 100);
   }
 
   void setPlaybackSpeed(double speed) {
-    if (_useNativePlayer) return;
+    if (_useNativePlayer) return; // TV 端由原生播放器处理
     _playbackSpeed = speed;
     _mediaKitPlayer?.setRate(speed);
     notifyListeners();
@@ -1488,10 +1696,14 @@ class PlayerProvider extends ChangeNotifier {
     playChannel(channels[idx - 1]);
   }
 
+  /// Switch to next source for current channel (if has multiple sources)
   void switchToNextSource() {
     if (_currentChannel == null || !_currentChannel!.hasMultipleSources) return;
+
+    // 取消任何正在进行的自动检测
     _isAutoDetecting = false;
     _retryTimer?.cancel();
+
     final newIndex = (_currentChannel!.currentSourceIndex + 1) %
         _currentChannel!.sourceCount;
     _currentChannel!.currentSourceIndex = newIndex;
@@ -1499,18 +1711,25 @@ class PlayerProvider extends ChangeNotifier {
     ServiceLocator.log.d(
         'PlayerProvider: 手动切换到源 ${newIndex + 1}/${_currentChannel!.sourceCount}');
 
+    // 只有在非自动切换时才重置（手动切换时重置）
     if (!_isAutoSwitching) {
       _retryCount = 0;
       ServiceLocator.log
           .d('PlayerProvider: Manual source switch, reset retry state');
     }
+
+    // Play the new source
     _playCurrentSource();
   }
 
+  /// Switch to previous source for current channel (if has multiple sources)
   void switchToPreviousSource() {
     if (_currentChannel == null || !_currentChannel!.hasMultipleSources) return;
+
+    // 取消任何正在进行的自动检测
     _isAutoDetecting = false;
     _retryTimer?.cancel();
+
     final newIndex = (_currentChannel!.currentSourceIndex - 1 +
             _currentChannel!.sourceCount) %
         _currentChannel!.sourceCount;
@@ -1519,22 +1738,28 @@ class PlayerProvider extends ChangeNotifier {
     ServiceLocator.log.d(
         'PlayerProvider: 手动切换到源 ${newIndex + 1}/${_currentChannel!.sourceCount}');
 
+    // 只有在非自动切换时才重置（手动切换时重置）
     if (!_isAutoSwitching) {
       _retryCount = 0;
       ServiceLocator.log
           .d('PlayerProvider: Manual source switch, reset retry state');
     }
+
+    // Play the new source
     _playCurrentSource();
   }
 
+  /// Play the current source of the current channel
   Future<void> _playCurrentSource() async {
     if (_currentChannel == null) return;
 
+    // 记录初始配置
     ServiceLocator.log.d('开始播放频道源', tag: 'PlayerProvider');
     ServiceLocator.log.d(
         '频道: ${_currentChannel!.name}, 源索引 ${_currentChannel!.currentSourceIndex}/${_currentChannel!.sourceCount}',
         tag: 'PlayerProvider');
 
+    // 检测当前源是否可用
     final testService = ChannelTestService();
     final tempChannel = Channel(
       id: _currentChannel!.id,
@@ -1572,23 +1797,31 @@ class PlayerProvider extends ChangeNotifier {
 
     try {
       if (!_useNativePlayer) {
-        // 确保播放器存在
-        if (_mediaKitPlayer == null) {
-          _initMediaKitPlayer();
-        }
-
+        // ---------- 新增：尝试 rrsip 转换 ----------
         ServiceLocator.log
             .i('>>> 切换源: 尝试 rrsip 转换', tag: 'PlayerProvider');
         final rrsipUrl = await _resolveWithRrsip(url);
-        final realUrl = rrsipUrl ?? url;
+        final effectiveUrl = rrsipUrl ?? url;
 
+        // 如果 rrsip 转换成功，直接使用；否则再经过 redirectCache
+        ServiceLocator.log.i('>>> Source switch: start resolving redirect',
+            tag: 'PlayerProvider');
+        final redirectStartTime = DateTime.now();
+
+        final realUrl = (rrsipUrl != null)
+            ? effectiveUrl
+            : await ServiceLocator.redirectCache.resolveRealPlayUrl(effectiveUrl);
+
+        final redirectTime =
+            DateTime.now().difference(redirectStartTime).inMilliseconds;
+        ServiceLocator.log.i('>>> 切换源: 302重定向解析完成，耗时: ${redirectTime}ms',
+            tag: 'PlayerProvider');
         ServiceLocator.log
             .d('>>> 切换源: 使用播放地址: $realUrl', tag: 'PlayerProvider');
 
-        await _clearStartEndProperties();
-
         final playStartTime = DateTime.now();
-        await _ensureDeinterlaceAppliedIfNeeded();
+        // 代际计数器已在 _resetDeinterlaceDetection() 中递增，确保旧回调不影响新流
+        await _applyDeinterlaceFilter();
         await _mediaKitPlayer?.open(_createMedia(realUrl));
 
         final playTime =
@@ -1613,9 +1846,13 @@ class PlayerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Get current source index (1-based for display)
   int get currentSourceIndex => (_currentChannel?.currentSourceIndex ?? 0) + 1;
+
+  /// Get total source count
   int get sourceCount => _currentChannel?.sourceCount ?? 1;
 
+  /// Set current channel without starting playback (for native player coordination)
   void setCurrentChannelOnly(Channel channel) {
     _currentChannel = channel;
     notifyListeners();
@@ -1626,59 +1863,45 @@ class PlayerProvider extends ChangeNotifier {
   final Map<String, DateTime> _cacheTime = {};
   final Duration _cacheDuration = const Duration(minutes: 5);
 
-  /// 将 URL 转换为 IP 直连 + rrsip 形式。
-  /// 内部先处理 302 重定向，获取最终 URL，然后解析最终域名的 IP，构造新 URL。
-  /// 如果转换失败返回 null。
+  /// 将 URL 转换为 IP 直连 + rrsip 形式，如果转换失败则返回 null
   Future<String?> _resolveWithRrsip(String url) async {
-    try {
-      // 增加超时，防止卡死
-      final finalUrl = await ServiceLocator.redirectCache.resolveRealPlayUrl(url)
-          .timeout(const Duration(seconds: 10));
-      final uri = Uri.parse(finalUrl);
+    final uri = Uri.parse(url);
 
-      if (_isIP(uri.host) && uri.queryParameters.containsKey('rrsip')) {
-        return finalUrl;
-      }
+    // 如果已经是 IP 直连且带有 rrsip，直接返回原 URL（无需转换）
+    if (_isIP(uri.host) && uri.queryParameters.containsKey('rrsip')) {
+      return url;
+    }
 
-      final originalUri = Uri.parse(url);
-      final originalHost = originalUri.host;
+    final host = uri.host;
 
-      if (_isIP(uri.host)) {
-        if (!uri.queryParameters.containsKey('rrsip')) {
-          final newUri = uri.replace(
-            queryParameters: {
-              ...uri.queryParameters,
-              'rrsip': originalHost,
-            },
-          );
-          return newUri.toString();
-        }
-        return finalUrl;
-      }
-
-      final ip = await _resolveDomain(uri.host);
-      if (ip == null) {
-        return null;
-      }
-
-      final newUri = uri.replace(
-        host: ip,
-        queryParameters: {
-          ...uri.queryParameters,
-          'rrsip': originalHost,
-        },
-      );
-      return newUri.toString();
-    } on TimeoutException {
-      ServiceLocator.log.w('_resolveWithRrsip 超时，返回 null');
-      return null;
-    } catch (e) {
-      ServiceLocator.log.w('_resolveWithRrsip 失败: $e');
+    // 如果主机名已经是 IP，但缺少 rrsip，可根据需要添加，但此处不添加（仅当服务商要求）
+    if (_isIP(host)) {
+      // 不添加 rrsip，返回 null 表示不转换
       return null;
     }
+
+    // 解析域名获取 IP（默认优先 IPv4，但支持 IPv6 回退）
+    final ip = await _resolveDomain(host, preferIPv6: false);
+    if (ip == null) {
+      // 解析失败，返回 null
+      return null;
+    }
+
+    // 重构 URL：主机替换为 IP，添加 rrsip=原始域名
+    final newUri = uri.replace(
+      host: ip,
+      queryParameters: {
+        ...uri.queryParameters,
+        'rrsip': host,
+      },
+    );
+    return newUri.toString();
   }
 
+  /// 解析域名，返回首选 IP
+  /// [preferIPv6] 是否优先返回 IPv6 地址（默认 false，优先 IPv4）
   Future<String?> _resolveDomain(String host, {bool preferIPv6 = false}) async {
+    // 检查缓存
     if (_dnsCache.containsKey(host) &&
         _cacheTime.containsKey(host) &&
         DateTime.now().difference(_cacheTime[host]!) < _cacheDuration) {
@@ -1689,13 +1912,16 @@ class PlayerProvider extends ChangeNotifier {
       final addresses = await InternetAddress.lookup(host);
       String? bestIp;
 
+      // 根据 preferIPv6 决定遍历顺序
       if (preferIPv6) {
+        // 优先 IPv6 公网地址
         for (final addr in addresses) {
           if (addr.type == InternetAddressType.IPv6 && !_isPrivateIP(addr.address)) {
             bestIp = addr.address;
             break;
           }
         }
+        // 如果没有公网 IPv6，尝试 IPv4 公网
         if (bestIp == null) {
           for (final addr in addresses) {
             if (addr.type == InternetAddressType.IPv4 && !_isPrivateIP(addr.address)) {
@@ -1704,8 +1930,10 @@ class PlayerProvider extends ChangeNotifier {
             }
           }
         }
+        // 最后回退到第一个可用地址
         bestIp ??= addresses.first.address;
       } else {
+        // 优先 IPv4 公网地址（默认行为）
         for (final addr in addresses) {
           if (addr.type == InternetAddressType.IPv4 && !_isPrivateIP(addr.address)) {
             bestIp = addr.address;
@@ -1723,6 +1951,7 @@ class PlayerProvider extends ChangeNotifier {
         bestIp ??= addresses.first.address;
       }
 
+      // 缓存
       _dnsCache[host] = bestIp;
       _cacheTime[host] = DateTime.now();
       return bestIp;
@@ -1737,7 +1966,9 @@ class PlayerProvider extends ChangeNotifier {
            RegExp(r'^[0-9a-fA-F:]+$').hasMatch(host);
   }
 
+  /// 判断是否为内网 / 私有 / 链路本地地址（支持 IPv4 和 IPv6）
   bool _isPrivateIP(String ip) {
+    // IPv4 私有地址
     if (ip.startsWith('10.')) return true;
     if (ip.startsWith('192.168.')) return true;
     if (ip.startsWith('172.') && ip.split('.').length > 1) {
@@ -1746,23 +1977,28 @@ class PlayerProvider extends ChangeNotifier {
     }
     if (ip == '127.0.0.1') return true;
 
-    if (ip.startsWith('fe80:')) return true;
-    if (ip.startsWith('fc00:') || ip.startsWith('fd00:')) return true;
-    if (ip == '::1') return true;
-    if (ip.startsWith('ff00:')) return true;
-    if (ip.startsWith('::')) return true;
+    // IPv6 私有 / 链路本地 / 环回地址
+    if (ip.startsWith('fe80:')) return true; // 链路本地
+    if (ip.startsWith('fc00:') || ip.startsWith('fd00:')) return true; // 唯一本地地址
+    if (ip == '::1') return true; // 环回
+    if (ip.startsWith('ff00:')) return true; // 组播（通常不用于播放）
+    if (ip.startsWith('::')) return true; // 未指定地址
 
     return false;
   }
 
-  // ============ 回放 URL 生成 ============
+  // ============ 回放 URL 生成（方案一：分离 playseek） ============
+  /// 生成回放 URL 并提取起止时间，返回不带 playseek 参数的干净 URL 和起止时间字符串
+  /// 调用者应使用返回的 URL 进行播放，并在播放器初始化后通过 setProperty 设置 start 和 end 属性
   CatchupUrlResult? generateCatchupUrlWithTime(Channel channel, EpgProgram program) {
+    // 1. 确定模板
     String? catchupSource = channel.catchupSource;
     if (catchupSource == null || catchupSource.isEmpty) {
       final defaultTemplate = ServiceLocator.settings?.defaultCatchupSource;
       if (defaultTemplate != null && defaultTemplate.isNotEmpty) {
         catchupSource = defaultTemplate;
       } else {
+        // 硬编码一个常见模板（兼容大多数 IPTV）
         catchupSource = '?playseek=\${(b)yyyyMMddHHmmss}-\${(e)yyyyMMddHHmmss}';
       }
     }
@@ -1781,6 +2017,7 @@ class PlayerProvider extends ChangeNotifier {
 
     var url = catchupSource;
 
+    // 处理自定义日期格式占位符（支持 ${(b)yyyyMMddHHmmss} 等）
     final customFormatRegex = RegExp(r'\$\{\(([bBeE])([uU]?)\)([^}]+)\}');
     final customMatches = customFormatRegex.allMatches(url);
     for (final match in customMatches) {
@@ -1797,9 +2034,12 @@ class PlayerProvider extends ChangeNotifier {
         final formatter = DateFormat(formatStr);
         final formatted = formatter.format(dateTime);
         url = url.replaceFirst(match.group(0)!, formatted);
-      } catch (_) {}
+      } catch (_) {
+        // 忽略格式错误
+      }
     }
 
+    // 处理花括号版本 {(b)yyyyMMddHHmmss}
     final braceFormatRegex = RegExp(r'\{\(([bBeE])([uU]?)\)([^}]+)\}');
     final braceMatches = braceFormatRegex.allMatches(url);
     for (final match in braceMatches) {
@@ -1819,6 +2059,7 @@ class PlayerProvider extends ChangeNotifier {
       } catch (_) {}
     }
 
+    // 标准 ${start} / ${stop} / ${end} 占位符
     url = url.replaceAll(RegExp(r'\$\{start\}'), startIsoClean);
     url = url.replaceAll(RegExp(r'\$\{stop\}'), endIsoClean);
     url = url.replaceAll(RegExp(r'\$\{end\}'), endIsoClean);
@@ -1827,6 +2068,7 @@ class PlayerProvider extends ChangeNotifier {
     url = url.replaceAll(RegExp(r'\{stop\}'), endIsoClean);
     url = url.replaceAll(RegExp(r'\{end\}'), endIsoClean);
 
+    // append 模式特殊处理
     if (catchupMode == 'append') {
       final template = catchupSource;
       final startSec = startUtc.millisecondsSinceEpoch ~/ 1000;
@@ -1835,9 +2077,11 @@ class PlayerProvider extends ChangeNotifier {
           .replaceAll('{utc}', startSec.toString())
           .replaceAll('{utcend}', endSec.toString());
       final fullUrl = channel.url + replaced;
+      // append 模式下没有 playseek 参数，直接返回
       return CatchupUrlResult(url: fullUrl, startTime: null, endTime: null);
     }
 
+    // 判断 catchup-source 是完整 URL 还是片段
     final looksLikeFullUrl = catchupSource.contains('://');
     String finalUrl;
     if (!looksLikeFullUrl) {
@@ -1851,6 +2095,7 @@ class PlayerProvider extends ChangeNotifier {
       finalUrl = url;
     }
 
+    // 从最终 URL 中提取 playseek 参数
     final parsed = Uri.parse(finalUrl);
     String? startTime;
     String? endTime;
@@ -1863,6 +2108,7 @@ class PlayerProvider extends ChangeNotifier {
       }
     }
 
+    // 移除 playseek 参数，得到干净 URL
     final cleanUri = parsed.replace(queryParameters: {
       ...parsed.queryParameters,
       'playseek': null,
@@ -1895,6 +2141,7 @@ class PlayerProvider extends ChangeNotifier {
     _noVideoFallbackAttempted = true;
     Future.delayed(const Duration(seconds: 3), () {
       if (_isDisposed) return;
+      // 若已播放但仍无画面（宽度为0），尝试解码回调
       if (_state == PlayerState.playing &&
           _videoWidth == 0 &&
           _videoHeight == 0) {
