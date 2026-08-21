@@ -1869,8 +1869,8 @@ class PlayerProvider extends ChangeNotifier {
       return null;
     }
 
-    // 解析域名获取 IP
-    final ip = await _resolveDomain(host);
+    // 解析域名获取 IP（默认优先 IPv4，但支持 IPv6 回退）
+    final ip = await _resolveDomain(host, preferIPv6: false);
     if (ip == null) {
       // 解析失败，返回 null
       return null;
@@ -1887,8 +1887,9 @@ class PlayerProvider extends ChangeNotifier {
     return newUri.toString();
   }
 
-  /// 解析域名，返回首选 IP（IPv4 公网优先）
-  Future<String?> _resolveDomain(String host) async {
+  /// 解析域名，返回首选 IP
+  /// [preferIPv6] 是否优先返回 IPv6 地址（默认 false，优先 IPv4）
+  Future<String?> _resolveDomain(String host, {bool preferIPv6 = false}) async {
     // 检查缓存
     if (_dnsCache.containsKey(host) &&
         _cacheTime.containsKey(host) &&
@@ -1899,13 +1900,45 @@ class PlayerProvider extends ChangeNotifier {
     try {
       final addresses = await InternetAddress.lookup(host);
       String? bestIp;
-      for (final addr in addresses) {
-        if (addr.type == InternetAddressType.IPv4 && !_isPrivateIP(addr.address)) {
-          bestIp = addr.address;
-          break;
+
+      // 根据 preferIPv6 决定遍历顺序
+      if (preferIPv6) {
+        // 优先 IPv6 公网地址
+        for (final addr in addresses) {
+          if (addr.type == InternetAddressType.IPv6 && !_isPrivateIP(addr.address)) {
+            bestIp = addr.address;
+            break;
+          }
         }
+        // 如果没有公网 IPv6，尝试 IPv4 公网
+        if (bestIp == null) {
+          for (final addr in addresses) {
+            if (addr.type == InternetAddressType.IPv4 && !_isPrivateIP(addr.address)) {
+              bestIp = addr.address;
+              break;
+            }
+          }
+        }
+        // 最后回退到第一个可用地址
+        bestIp ??= addresses.first.address;
+      } else {
+        // 优先 IPv4 公网地址（默认行为）
+        for (final addr in addresses) {
+          if (addr.type == InternetAddressType.IPv4 && !_isPrivateIP(addr.address)) {
+            bestIp = addr.address;
+            break;
+          }
+        }
+        if (bestIp == null) {
+          for (final addr in addresses) {
+            if (addr.type == InternetAddressType.IPv6 && !_isPrivateIP(addr.address)) {
+              bestIp = addr.address;
+              break;
+            }
+          }
+        }
+        bestIp ??= addresses.first.address;
       }
-      bestIp ??= addresses.first.address;
 
       // 缓存
       _dnsCache[host] = bestIp;
@@ -1922,13 +1955,24 @@ class PlayerProvider extends ChangeNotifier {
            RegExp(r'^[0-9a-fA-F:]+$').hasMatch(host);
   }
 
+  /// 判断是否为内网 / 私有 / 链路本地地址（支持 IPv4 和 IPv6）
   bool _isPrivateIP(String ip) {
+    // IPv4 私有地址
     if (ip.startsWith('10.')) return true;
     if (ip.startsWith('192.168.')) return true;
     if (ip.startsWith('172.') && ip.split('.').length > 1) {
       final second = int.tryParse(ip.split('.')[1]) ?? 0;
       if (second >= 16 && second <= 31) return true;
     }
+    if (ip == '127.0.0.1') return true;
+
+    // IPv6 私有 / 链路本地 / 环回地址
+    if (ip.startsWith('fe80:')) return true; // 链路本地
+    if (ip.startsWith('fc00:') || ip.startsWith('fd00:')) return true; // 唯一本地地址
+    if (ip == '::1') return true; // 环回
+    if (ip.startsWith('ff00:')) return true; // 组播（通常不用于播放）
+    if (ip.startsWith('::')) return true; // 未指定地址
+
     return false;
   }
 
