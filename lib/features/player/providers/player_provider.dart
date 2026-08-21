@@ -280,8 +280,14 @@ class PlayerProvider extends ChangeNotifier {
         // 清除可能的 start/end 残留
         await _clearStartEndProperties();
 
+        // 直接 open，不重建播放器
         final playStartTime = DateTime.now();
-        await _applyDeinterlaceFilter();
+        // 如果尚未初始化播放器（异常情况），则初始化
+        if (_mediaKitPlayer == null) {
+          _initMediaKitPlayer();
+        }
+        // 确保去交错配置已应用（但只做必要部分）
+        await _ensureDeinterlaceAppliedIfNeeded();
         await _mediaKitPlayer?.open(_createMedia(realUrl));
 
         final playTime = DateTime.now().difference(playStartTime).inMilliseconds;
@@ -313,6 +319,14 @@ class PlayerProvider extends ChangeNotifier {
     } catch (e) {
       // 忽略错误
     }
+  }
+
+  // ---------- 应用去交错配置（仅当需要时） ----------
+  Future<void> _ensureDeinterlaceAppliedIfNeeded() async {
+    if (_deinterlaceConfiguredForCurrentStream) {
+      return; // 已配置，跳过
+    }
+    await _applyDeinterlaceFilter();
   }
 
   String _hwdecMode = 'unknown';
@@ -378,7 +392,10 @@ class PlayerProvider extends ChangeNotifier {
     if (_useNativePlayer) {
       return;
     }
-    _initMediaKitPlayer(useSoftwareDecoding: useSoftwareDecoding);
+    // 只在第一次创建播放器，后续复用
+    if (_mediaKitPlayer == null) {
+      _initMediaKitPlayer(useSoftwareDecoding: useSoftwareDecoding);
+    }
   }
 
   Future<void> warmup() async {
@@ -392,6 +409,13 @@ class PlayerProvider extends ChangeNotifier {
 
   Future<void> _initMediaKitPlayer(
       {bool useSoftwareDecoding = false, String bufferStrength = 'fast'}) async {
+    // 如果已经存在且未销毁，不要重复创建
+    if (_mediaKitPlayer != null && !_isDisposed) {
+      ServiceLocator.log.d('播放器已存在，跳过初始化');
+      return;
+    }
+
+    // 如果之前创建过但被销毁，创建新的
     _mediaKitPlayer?.dispose();
     _debugInfoTimer?.cancel();
     final prefs = ServiceLocator.prefs;
@@ -488,8 +512,10 @@ class PlayerProvider extends ChangeNotifier {
     _setupMediaKitListeners();
     _updateDebugInfo();
 
+    // 初始化时设置一次 hwdec，并重置去交错状态
     _initialHwdecSet = false;
     _resetDeinterlaceDetection();
+    // 应用必要的去交错设置（但不一定会立即生效，因为 videoParams 尚未触发）
     await _applyDeinterlaceFilter();
 
     ServiceLocator.log.i('播放器初始化完成', tag: 'PlayerProvider');
@@ -543,13 +569,19 @@ class PlayerProvider extends ChangeNotifier {
     final prefs = ServiceLocator.prefs;
     final enabled = prefs.getBool('deinterlace_enabled') ?? true;
 
+    // 这些是必须的，不管是否已配置
     await _safeSetProperty('video-sync', 'display-resample', 'video-sync');
     await _safeSetProperty('framedrop', 'vo', 'framedrop');
-
     await _safeSetProperty(
         'protocol-whitelist',
         'udp,rtp,rtsp,tcp,tls,data,file,http,https,crypto',
         'protocol-whitelist');
+
+    // 如果已经配置过且启用状态相同，跳过后续耗时设置
+    if (_deinterlaceConfiguredForCurrentStream) {
+      ServiceLocator.log.d('去交错已配置，跳过重复设置');
+      return;
+    }
 
     if (enabled) {
       if (!_initialHwdecSet) {
@@ -568,9 +600,11 @@ class PlayerProvider extends ChangeNotifier {
       _videoParamsSubscription?.cancel();
       _videoParamsSubscription = null;
       ServiceLocator.log.i('去交错已禁用', tag: 'PlayerProvider');
+      _deinterlaceConfiguredForCurrentStream = true; // 标记已配置
       return;
     }
 
+    // 异步阶段：注册 videoParams 回调
     if (_videoParamsSubscription == null) {
       _deinterlaceConfiguredForCurrentStream = false;
       _videoParamsSubscription = _mediaKitPlayer?.stream.videoParams.listen((params) async {
@@ -1062,6 +1096,9 @@ class PlayerProvider extends ChangeNotifier {
     if (!_allowSoftwareFallback) return;
     _retryCount++;
     final channelToPlay = _currentChannel;
+    // 重建播放器（软解码模式）
+    _mediaKitPlayer?.dispose();
+    _mediaKitPlayer = null;
     _initMediaKitPlayer(useSoftwareDecoding: true);
     if (channelToPlay != null) playChannel(channelToPlay);
   }
@@ -1070,14 +1107,24 @@ class PlayerProvider extends ChangeNotifier {
 
   Future<void> playChannel(Channel channel,
       {bool preserveCurrentSource = false}) async {
-    // 彻底停止当前播放，重置状态（避免卡死）
-    if (_mediaKitPlayer != null && !_useNativePlayer) {
-      ServiceLocator.log.d('playChannel: 停止当前播放');
-      await _mediaKitPlayer?.stop();
-      await _clearStartEndProperties();
+    // ========== 优化：只在首次创建播放器 ==========
+    if (_mediaKitPlayer == null && !_useNativePlayer) {
+      ServiceLocator.log.d('playChannel: 首次播放，初始化播放器');
+      _initMediaKitPlayer();
     }
 
-    // 重置状态
+    // ========== 停止当前播放（不销毁播放器） ==========
+    if (_mediaKitPlayer != null && !_useNativePlayer) {
+      ServiceLocator.log.d('playChannel: 停止当前播放（保留播放器实例）');
+      await _mediaKitPlayer?.stop();
+      await _clearStartEndProperties();
+      // 重置去交错配置标记（因为新流可能不同）
+      _deinterlaceConfiguredForCurrentStream = false;
+      // 重置代际，使旧 videoParams 回调失效
+      _resetDeinterlaceDetection();
+    }
+
+    // ========== 重置状态 ==========
     _state = PlayerState.idle;
     _error = null;
     _lastErrorMessage = null;
@@ -1086,7 +1133,7 @@ class PlayerProvider extends ChangeNotifier {
     _retryTimer?.cancel();
     _isAutoDetecting = false;
     _noVideoFallbackAttempted = false;
-    _resetDeinterlaceDetection();
+    _overrideDuration = null; // 清除回放时长覆盖
 
     ServiceLocator.log
         .i('========== 开始播放频道==========', tag: 'PlayerProvider');
@@ -1098,8 +1145,6 @@ class PlayerProvider extends ChangeNotifier {
 
     _currentChannel = channel;
     _state = PlayerState.loading;
-    // 错误状态已清
-    _overrideDuration = null; // 清除回放时长覆盖
     loadVolumeSettings();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       notifyListeners();
@@ -1141,7 +1186,7 @@ class PlayerProvider extends ChangeNotifier {
         ServiceLocator.log
             .i('>>> 尝试 rrsip 转换', tag: 'PlayerProvider');
         final rrsipUrl = await _resolveWithRrsip(playUrl);
-        final realUrl = rrsipUrl ?? playUrl; // fallback
+        final realUrl = rrsipUrl ?? playUrl;
 
         ServiceLocator.log.d('>>> 使用播放地址: $realUrl', tag: 'PlayerProvider');
 
@@ -1151,7 +1196,11 @@ class PlayerProvider extends ChangeNotifier {
         ServiceLocator.log
             .i('>>> Start initializing player', tag: 'PlayerProvider');
         final playStartTime = DateTime.now();
-        await _applyDeinterlaceFilter();
+
+        // ========== 优化：去交错滤镜只在需要时重新应用 ==========
+        await _ensureDeinterlaceAppliedIfNeeded();
+
+        // ========== 核心优化：直接打开新流，不重建播放器 ==========
         await _mediaKitPlayer?.open(_createMedia(realUrl));
 
         final playTime =
@@ -1190,6 +1239,9 @@ class PlayerProvider extends ChangeNotifier {
     final channelToPlay = _currentChannel;
     _state = PlayerState.loading;
     notifyListeners();
+    // 重新初始化播放器（重建）
+    _mediaKitPlayer?.dispose();
+    _mediaKitPlayer = null;
     _initMediaKitPlayer(bufferStrength: bufferStrength);
     if (channelToPlay != null) {
       await playChannel(channelToPlay);
@@ -1246,10 +1298,16 @@ class PlayerProvider extends ChangeNotifier {
       return;
     }
 
-    // 先停止当前播放
+    // 确保播放器存在
+    if (_mediaKitPlayer == null) {
+      _initMediaKitPlayer();
+    }
+
+    // 停止当前播放
     if (_mediaKitPlayer != null) {
       await _mediaKitPlayer?.stop();
       await _clearStartEndProperties();
+      _resetDeinterlaceDetection();
     }
 
     final startTime = DateTime.now();
@@ -1258,7 +1316,6 @@ class PlayerProvider extends ChangeNotifier {
     _lastErrorMessage = null;
     _errorDisplayed = false;
     _noVideoFallbackAttempted = false;
-    _resetDeinterlaceDetection();
     loadVolumeSettings();
     notifyListeners();
 
@@ -1275,7 +1332,7 @@ class PlayerProvider extends ChangeNotifier {
       ServiceLocator.log
           .i('>>> Start initializing player', tag: 'PlayerProvider');
       final playStartTime = DateTime.now();
-      await _applyDeinterlaceFilter();
+      await _ensureDeinterlaceAppliedIfNeeded();
       await _mediaKitPlayer?.open(_createMedia(realUrl));
 
       final playTime = DateTime.now().difference(playStartTime).inMilliseconds;
@@ -1515,6 +1572,11 @@ class PlayerProvider extends ChangeNotifier {
 
     try {
       if (!_useNativePlayer) {
+        // 确保播放器存在
+        if (_mediaKitPlayer == null) {
+          _initMediaKitPlayer();
+        }
+
         ServiceLocator.log
             .i('>>> 切换源: 尝试 rrsip 转换', tag: 'PlayerProvider');
         final rrsipUrl = await _resolveWithRrsip(url);
@@ -1526,7 +1588,7 @@ class PlayerProvider extends ChangeNotifier {
         await _clearStartEndProperties();
 
         final playStartTime = DateTime.now();
-        await _applyDeinterlaceFilter();
+        await _ensureDeinterlaceAppliedIfNeeded();
         await _mediaKitPlayer?.open(_createMedia(realUrl));
 
         final playTime =
