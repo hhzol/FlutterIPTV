@@ -393,7 +393,7 @@ class PlayerProvider extends ChangeNotifier {
         await _mediaKitPlayer?.open(
           _createMedia(finalPlayUrl),
         );
-
+      }
         final playTime =
             DateTime.now().difference(playStartTime).inMilliseconds;
         final totalTime = DateTime.now().difference(startTime).inMilliseconds;
