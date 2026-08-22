@@ -14,7 +14,7 @@ import '../../../core/platform/platform_detector.dart';
 import '../../../core/services/service_locator.dart';
 import '../../../core/services/channel_test_service.dart';
 import '../../../core/services/log_service.dart';
-import '../../../core/services/epg_service.dart'; // 新增：导入 EpgProgram
+import '../../../core/services/epg_service.dart';
 import '../../settings/providers/settings_provider.dart';
 
 enum PlayerState {
@@ -367,9 +367,8 @@ class PlayerProvider extends ChangeNotifier {
             tag: 'PlayerProvider');
         ServiceLocator.log.d('>>> 重试: 使用播放地址: $realUrl', tag: 'PlayerProvider');
 
-        // 如果是回放/catchup 流，先清洗 m3u8 中被 ffmpeg 自动继承到分片上的 playseek 参数
-        final playUrlForOpen = await _maybePrepareCatchupPlaylist(
-            _currentChannel, realUrl);
+        // 原样使用 realUrl，不对 m3u8 内容做任何修改
+        final playUrlForOpen = realUrl;
 
         final playStartTime = DateTime.now();
         // 代际计数器已在 _resetDeinterlaceDetection() 中递增，确保旧回调不影响新流
@@ -1395,9 +1394,8 @@ class PlayerProvider extends ChangeNotifier {
             .i('>>> 302重定向解析完成，耗时: ${redirectTime}ms', tag: 'PlayerProvider');
         ServiceLocator.log.d('>>> 使用播放地址: $realUrl', tag: 'PlayerProvider');
 
-        // 如果是回放/catchup 流，先清洗 m3u8 中被 ffmpeg 自动继承到分片上的 playseek 参数
-        final finalPlayUrl =
-            await _maybePrepareCatchupPlaylist(channel, realUrl);
+        // 原样使用 realUrl，不对 m3u8 内容做任何修改
+        final finalPlayUrl = realUrl;
 
         // 开始播放
         ServiceLocator.log
@@ -1536,9 +1534,8 @@ class PlayerProvider extends ChangeNotifier {
           .i('>>> 302重定向解析完成，耗时: ${redirectTime}ms', tag: 'PlayerProvider');
       ServiceLocator.log.d('>>> 使用播放地址: $realUrl', tag: 'PlayerProvider');
 
-      // 如果是回放/catchup 流（URL 带 playseek），先清洗分片上被自动继承的 playseek
-      final finalPlayUrl =
-          await _maybePrepareCatchupPlaylist(_currentChannel, realUrl);
+      // 原样使用 realUrl，不对 m3u8 内容做任何修改
+      final finalPlayUrl = realUrl;
 
       // 开始播放
       ServiceLocator.log
@@ -1840,9 +1837,8 @@ class PlayerProvider extends ChangeNotifier {
         ServiceLocator.log
             .d('>>> 切换源: 使用播放地址: $realUrl', tag: 'PlayerProvider');
 
-        // 如果是回放/catchup 流，先清洗 m3u8 中被自动继承到分片上的 playseek
-        final finalPlayUrl =
-            await _maybePrepareCatchupPlaylist(_currentChannel, realUrl);
+        // 原样使用 realUrl，不对 m3u8 内容做任何修改
+        final finalPlayUrl = realUrl;
 
         final playStartTime = DateTime.now();
         // 代际计数器已在 _resetDeinterlaceDetection() 中递增，确保旧回调不影响新流
@@ -2013,140 +2009,14 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   // ============ 回放/catchup m3u8 清洗 ============
-  //
-  // 问题背景：
-  // 请求 index.m3u8?playseek=xxx-yyy&rrsip=zzz 本身是正确、必须的（服务端需要
-  // playseek 才能生成对应时间段的回放播放列表）。但 ffmpeg/mpv 的 HLS demuxer
-  // 有一个"父 m3u8 请求 URL 的 query string 自动继承给不带参数的分片 URI"的行为
-  // （最初是为了兼容用 query 做 token 鉴权的 CDN）。这导致 playseek 被错误地
-  // 附加到每个 .ts 分片请求上，而分片服务器不认识/拒绝这个参数，播放失败。
-  //
-  // 解决方式：自己拉取 m3u8 文本、清洗分片 URI 上的 playseek 参数、写入本地
-  // 临时文件，再让播放器 open() 这个本地文件，从而绕开 ffmpeg 的自动继承行为。
+  // 注意：此方法已被修改为直接返回原始 URL，不对 m3u8 内容做任何修改。
+  // 播放器将直接使用服务器返回的最终地址（经过重定向后）来请求流，
+  // 所有鉴权参数由服务器返回的 Location 提供，无需程序干预。
 
-  /// 如果当前是回放/catchup 类型（或 URL 本身带 playseek 参数），
-  /// 则拉取远程 m3u8 并清洗分片 URI 上的 playseek，返回可直接 open() 的地址
-  /// （本地清洗后文件路径，或在不需要清洗/清洗失败时原样返回 rawUrl）
-  Future<String> _maybePrepareCatchupPlaylist(
-      Channel? channel, String rawUrl) async {
-    final isReplayType = channel?.type == ChannelType.replay;
-    final looksLikeCatchupUrl = rawUrl.contains('playseek=');
-
-    if (!isReplayType && !looksLikeCatchupUrl) {
-      return rawUrl;
-    }
-
-    // 只处理 m3u8（HLS），其他格式（如直接 ts/flv 直播）不需要处理
-    final path = Uri.parse(rawUrl).path.toLowerCase();
-    if (!path.endsWith('.m3u8') && !path.endsWith('.m3u')) {
-      return rawUrl;
-    }
-
-    try {
-      final cleanedPath = await _prepareCleanPlaylist(rawUrl);
-      return cleanedPath ?? rawUrl;
-    } catch (e) {
-      ServiceLocator.log.w('PlayerProvider: 清洗回放播放列表失败，回退到原始 URL: $e',
-          tag: 'PlayerProvider');
-      return rawUrl;
-    }
-  }
-
-  /// 拉取远程 m3u8，去掉分片 URI 上的 playseek 查询参数（ffmpeg 会把父 m3u8
-  /// 请求 URL 的 query string 自动继承给不带参数的分片 URI，分片服务器不认识
-  /// 这个参数会导致 404/拒绝），写入本地临时文件后返回本地文件路径。
-  /// 拉取或写入失败时返回 null（调用方应回退到原始远程 URL）。
-  Future<String?> _prepareCleanPlaylist(String m3u8Url) async {
-    final baseUri = Uri.parse(m3u8Url);
-    final userAgent =
-        ServiceLocator.settings?.userAgent ?? SettingsProvider.defaultUserAgent;
-
-    http.Response resp;
-    try {
-      resp = await http
-          .get(baseUri, headers: {'User-Agent': userAgent})
-          .timeout(const Duration(seconds: 8));
-    } catch (e) {
-      ServiceLocator.log.w('PlayerProvider: 拉取回放 m3u8 失败: $e',
-          tag: 'PlayerProvider');
-      return null;
-    }
-
-    if (resp.statusCode != 200) {
-      ServiceLocator.log.w(
-          'PlayerProvider: 拉取回放 m3u8 状态码异常: ${resp.statusCode}',
-          tag: 'PlayerProvider');
-      return null;
-    }
-
-    String body;
-    try {
-      body = utf8.decode(resp.bodyBytes);
-    } catch (_) {
-      body = resp.body;
-    }
-
-    final lines = const LineSplitter().convert(body);
-    final outLines = <String>[];
-
-    for (final line in lines) {
-      final trimmed = line.trim();
-
-      // 空行、注释/标签行原样保留（标签中的 URI 属性，如 #EXT-X-KEY 的 URI=".."，
-      // 通常也带 token，这里不做处理，只处理独立的分片/子播放列表 URI 行）
-      if (trimmed.isEmpty || trimmed.startsWith('#')) {
-        outLines.add(line);
-        continue;
-      }
-
-      // 这是一条分片 / 子播放列表 URI
-      var segUri = Uri.tryParse(trimmed);
-      if (segUri == null) {
-        outLines.add(line);
-        continue;
-      }
-
-      // 如果不是绝对 URL，先相对 m3u8 基址解析成绝对 URL，
-      // 避免写入本地文件后相对路径解析基准发生变化
-      if (!segUri.hasScheme) {
-        segUri = baseUri.resolveUri(segUri);
-      }
-
-      // 去掉分片 URI 上的 playseek 参数（无论是服务端原样带出来的，
-      // 还是本地写入时可能存在的历史残留，一律清掉——分片服务器不需要它）
-      if (segUri.queryParameters.containsKey('playseek')) {
-        final newParams = Map<String, String>.from(segUri.queryParameters)
-          ..remove('playseek');
-        segUri = segUri.replace(
-          queryParameters: newParams.isEmpty ? null : newParams,
-        );
-      }
-
-      outLines.add(segUri.toString());
-    }
-
-    final cleanContent = outLines.join('\n');
-
-    try {
-      final dir = await getTemporaryDirectory();
-      final file = File(
-          '${dir.path}/catchup_${DateTime.now().millisecondsSinceEpoch}.m3u8');
-      await file.writeAsString(cleanContent, flush: true);
-
-      // 清理上一个临时播放列表文件，避免堆积
-      await _cleanupTempPlaylist();
-      _lastCleanPlaylistFile = file;
-
-      ServiceLocator.log.i(
-          'PlayerProvider: 回放播放列表已清洗并写入本地: ${file.path}',
-          tag: 'PlayerProvider');
-
-      return file.path;
-    } catch (e) {
-      ServiceLocator.log.w('PlayerProvider: 写入清洗后播放列表失败: $e',
-          tag: 'PlayerProvider');
-      return null;
-    }
+  /// 直接返回原始 URL，不对 m3u8 内容做任何修改。
+  Future<String> _maybePrepareCatchupPlaylist(Channel? channel, String rawUrl) async {
+    // 原样返回，不进行任何清洗或重写
+    return rawUrl;
   }
 
   /// 删除上一次生成的清洗后本地播放列表临时文件
