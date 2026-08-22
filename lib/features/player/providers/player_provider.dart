@@ -539,18 +539,10 @@ class PlayerProvider extends ChangeNotifier {
       configuration: PlayerConfiguration(
         bufferSize: bufferSize,
         vo: vo,
-        // 设置网络超时（可选）
-        // timeout: 3 秒连接最长超时
+        timeout: 8000, // 8秒网络超时，防止无限卡死
         // 根据日志级别启用 mpv 日志
-        logLevel: ServiceLocator.log.currentLevel == LogLevel.debug
-            ? MPVLogLevel.debug
-            : (ServiceLocator.log.currentLevel == LogLevel.off
-                ? MPVLogLevel.error
-                : MPVLogLevel.info),
-        protocolWhitelist: [
-          'file', 'http', 'https', 'tcp', 'tls', 
-          'crypto', 'hls', 'applehttp', 'udp', 'rtp'
-        ],
+        logLevel: ...,
+        protocolWhitelist: [...],
       ),
     );
 
