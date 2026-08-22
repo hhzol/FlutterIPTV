@@ -368,13 +368,31 @@ class PlayerProvider extends ChangeNotifier {
         ServiceLocator.log.d('>>> 重试: 使用播放地址: $realUrl', tag: 'PlayerProvider');
 
         // 如果是回放/catchup 流，先清洗 m3u8 中被 ffmpeg 自动继承到分片上的 playseek 参数
-        final playUrlForOpen = await _maybePrepareCatchupPlaylist(
-            _currentChannel, realUrl);
-
-        final playStartTime = DateTime.now();
-        // 代际计数器已在 _resetDeinterlaceDetection() 中递增，确保旧回调不影响新流
+        final finalPlayUrl =
+            await _maybePrepareCatchupPlaylist(
+          _currentChannel,
+          realUrl,
+        );
+        
+        ServiceLocator.log.i(
+          '>>> playUrl 最终交给播放器的 URL: '
+          '$finalPlayUrl',
+          tag: 'PlayerProvider',
+        );
+        
+        ServiceLocator.log.i(
+          '>>> Start initializing player',
+          tag: 'PlayerProvider',
+        );
+        
+        final playStartTime =
+            DateTime.now();
+        
         await _applyDeinterlaceFilter();
-        await _mediaKitPlayer?.open(_createMedia(playUrlForOpen));
+        
+        await _mediaKitPlayer?.open(
+          _createMedia(finalPlayUrl),
+        );
 
         final playTime =
             DateTime.now().difference(playStartTime).inMilliseconds;
