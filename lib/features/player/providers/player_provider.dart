@@ -539,12 +539,21 @@ class PlayerProvider extends ChangeNotifier {
       configuration: PlayerConfiguration(
         bufferSize: bufferSize,
         vo: vo,
-        timeout: 8000, // 8秒网络超时，防止无限卡死
         // 根据日志级别启用 mpv 日志
-        logLevel: ...,
-        protocolWhitelist: [...],
+        logLevel: ServiceLocator.log.currentLevel == LogLevel.debug
+            ? MPVLogLevel.debug
+            : (ServiceLocator.log.currentLevel == LogLevel.off
+                ? MPVLogLevel.error
+                : MPVLogLevel.info),
+        protocolWhitelist: [
+          'file', 'http', 'https', 'tcp', 'tls',
+          'crypto', 'hls', 'applehttp', 'udp', 'rtp'
+        ],
       ),
     );
+
+    // 设置网络超时（单位毫秒），防止回放卡死
+    await _safeSetProperty('network-timeout', '8000', 'network-timeout');
 
     // 确定硬件解码模式
     String? hwdecMode;
@@ -599,7 +608,6 @@ class PlayerProvider extends ChangeNotifier {
 
     ServiceLocator.log.i('播放器初始化完成', tag: 'PlayerProvider');
   }
-
   /// 安全调用 setProperty，单个失败不影响其他调用
   /// 返回 true 表示成功，false 表示失败
   Future<bool> _safeSetProperty(String property, String value, String label) async {
